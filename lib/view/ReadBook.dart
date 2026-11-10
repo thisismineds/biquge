@@ -2,13 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:PureBook/common/ReaderPageAgent.dart';
-import 'package:PureBook/common/common.dart';
 import 'package:PureBook/common/toast.dart';
-import 'package:PureBook/common/util.dart';
 import 'package:PureBook/entity/BookInfo.dart';
 import 'package:PureBook/entity/BookTag.dart';
 import 'package:PureBook/entity/Chapter.dart';
-import 'package:PureBook/entity/ChapterList.dart';
+import 'package:PureBook/service/book_sources.dart';
 import 'package:PureBook/event/event.dart';
 import 'package:PureBook/model/ColorModel.dart';
 import 'package:PureBook/store/Store.dart';
@@ -16,7 +14,6 @@ import 'package:PureBook/view/BookDetail.dart';
 import 'package:PureBook/view/ChapterView.dart';
 import 'package:PureBook/view/MyBottomSheet.dart';
 import 'package:PureBook/view/MyViewPage.dart';
-import 'package:dio/dio.dart';
 import 'package:flustars/flustars.dart';
 import 'package:flutter/material.dart';
 
@@ -37,7 +34,7 @@ class ReadBook extends StatefulWidget {
 class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
   BookInfo _bookInfo;
   BookTag _bookTag;
-  static GlobalKey<ScaffoldState> _globalKey = new GlobalKey();
+  final GlobalKey<ScaffoldState> _globalKey = GlobalKey<ScaffoldState>();
   String content = '';
   double contentH;
   double contentW;
@@ -56,15 +53,31 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
 
   _ReadBookState(this._bookInfo);
 
-  bool fix = true;
   List<Chapter> chapters = [];
   var value;
+  bool loading = false;
+  bool initialized = false;
+  bool downloading = false;
+  String error;
+  StreamSubscription<ChapterEvent> chapterSubscription;
+  StreamSubscription<PageEvent> pageSubscription;
+  String get recordKey =>
+      BookSources.recordKey(_bookInfo.sourceId, _bookInfo.Id);
+  String get chaptersKey => _bookInfo.sourceId == 'legacy'
+      ? '${_bookInfo.Id}chapters'
+      : '$recordKey:chapters';
+  String contentKey(int id) =>
+      BookSources.contentKey(_bookInfo.sourceId, _bookInfo.Id, id);
 
   @override
   void dispose() {
     // TODO: implement dispose
+    chapterSubscription?.cancel();
+    pageSubscription?.cancel();
+    _pageController?.dispose();
     super.dispose();
-    SpUtil.putString(_bookInfo.Id.toString(), jsonEncode(_bookTag));
+    if (_bookTag != null && !loading && error == null)
+      SpUtil.putString(recordKey, jsonEncode(_bookTag));
     SpUtil.putDouble('fontSize', fontSize);
     SpUtil.putInt('bg_i', bg_i);
 
@@ -73,17 +86,20 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    SpUtil.putString(_bookInfo.Id.toString(), jsonEncode(_bookTag));
+    if (_bookTag != null && !loading && error == null)
+      SpUtil.putString(recordKey, jsonEncode(_bookTag));
     SpUtil.putDouble('fontSize', fontSize);
   }
 
   @override
   void initState() {
     WidgetsBinding.instance.addObserver(this);
-    eventBus
+    chapterSubscription = eventBus
         .on<ChapterEvent>()
         .listen((ChapterEvent data) => freshUi(data.chapterId));
-    eventBus.on<PageEvent>().listen((PageEvent data) => _changePage(data.page));
+    pageSubscription = eventBus
+        .on<PageEvent>()
+        .listen((PageEvent data) => _changePage(data.page));
     getBookRecord();
     if (SpUtil.haveKey('fontSize')) {
       fontSize = SpUtil.getDouble('fontSize');
@@ -103,14 +119,24 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
     });
   }
 
-  asyncInit() async {
-    await getChapters();
-    if (_bookTag.content == null) {
+  Future<void> asyncInit() async {
+    try {
+      await getChapters();
       await loadChapter(1);
+      if (mounted)
+        setState(() {
+          initialized = true;
+        });
+    } catch (e) {
+      if (mounted)
+        setState(() {
+          error = '$e';
+        });
     }
   }
 
   freshUi(int cur) {
+    if (loading) return;
     if (mounted) {
       setState(() {
         value = cur.toDouble();
@@ -122,221 +148,142 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
   }
 
 //获取本书记录
-  getBookRecord() async {
-    if (SpUtil.haveKey(_bookInfo.Id.toString())) {
-      _bookTag = BookTag.fromJson(
-          jsonDecode(SpUtil.getString(_bookInfo.Id.toString())));
-      chapters = _bookTag.chapters;
-      //slider value
-      value = _bookTag.cur.toDouble();
-      if (_bookTag.index > _bookTag.pageOffsets.length) {
-        _bookTag.index = _bookTag.pageOffsets.length;
-      }
-      _pageController = MyPageController(initialPage: _bookTag.index);
-      //本书已读过
-      setState(() {});
+  void getBookRecord() {
+    if (SpUtil.haveKey(recordKey)) {
+      _bookTag = BookTag.fromJson(jsonDecode(SpUtil.getString(recordKey)));
+      chapters = _bookTag.chapters ?? [];
+      _bookTag.pageOffsets ??= [];
+      if (_bookTag.cur == null ||
+          _bookTag.cur < 0 ||
+          _bookTag.cur >= chapters.length) _bookTag.cur = 0;
+      if (_bookTag.index == null ||
+          _bookTag.index < 0 ||
+          _bookTag.index >= _bookTag.pageOffsets.length) _bookTag.index = 0;
     } else {
-      if (SpUtil.haveKey('${_bookInfo.Id}chapters')) {
-        var string = SpUtil.getString('${_bookInfo.Id}chapters');
-        List v = jsonDecode(string);
-        chapters = v.map((f) => Chapter.fromJson(f)).toList();
+      if (SpUtil.haveKey(chaptersKey)) {
+        chapters = (jsonDecode(SpUtil.getString(chaptersKey)) as List)
+            .map((c) => Chapter.fromJson(c))
+            .toList();
       }
       _bookTag = BookTag(0, 0, chapters, _bookInfo.Name);
-      _pageController = MyPageController(initialPage: 0);
-    }
-  }
-
-  getChapters() async {
-    var url = Common.chaptersUrl + _bookInfo.Id.toString() + '/';
-    var _context = null;
-    if (!SpUtil.haveKey(_bookInfo.Id.toString())) {
-      _context = context;
-    }
-    Response response = await Util(_context).http().get(url);
-
-    String data = response.data;
-    String replace = data.replaceAll('},]', '}]');
-    var jsonDecode3 = jsonDecode(replace)['data'];
-    List jsonDecode2 = jsonDecode3['list'];
-    List<Chapter> temp = [];
-    var list = jsonDecode2.map((m) => ChapterList.fromJson(m)).toList();
-    //第一次加载章节
-    for (var i = 0; i < list.length; i++) {
-      //目录名hasContent=0
-      temp.add(Chapter(0, 0, list[i].name));
-      var list2 = list[i].list;
-      for (var j = 0; j < list2.length; j++) {
-        temp.add(Chapter(1, list2[j].id, list2[j].name));
-      }
-    }
-    temp.setAll(0, chapters);
-
-    chapters = temp;
-    _bookTag.chapters = temp;
-    SpUtil.putString(_bookInfo.Id.toString(), jsonEncode(_bookTag));
-    //书的最后一章
-    if (_bookInfo.CId == -1) {
-      _bookTag.cur = chapters.length - 1;
-      value = _bookTag.cur.toDouble();
-    }
-  }
-
-  loadChapter(flag) async {
-    //flage =g
-    if (flag == 1) {
-      //f g  g==1 forward =0 back
-      getBookChapter(1, 1);
-      //预加载下一章
-      getBookChapter(0, 1);
-    } else {
-      getBookChapter(1, 0);
-      //预加载上一章
-      getBookChapter(0, 0);
     }
     value = _bookTag.cur.toDouble();
+    _pageController = MyPageController(initialPage: _bookTag.index);
   }
 
-//f 1 加载  g 1 前进
-  getBookChapter(f, g) async {
-    //f==0 是预加载
-    if (f == 0) {
-      int temp = 0;
-      if (g == 1) {
-        temp = _bookTag.cur + 1;
-        if (temp == chapters.length) {
-          return;
-        }
-        var chapter = chapters[temp];
-        while (chapter.hasContent == 0) {
-          temp += 1;
-          if (temp == chapters.length) {
-            break;
-          }
-          chapter = chapters[temp];
-        }
-      } else {
-        temp = _bookTag.cur - 1;
-        if (temp < 0) {
-          return;
-        }
-        var chapter = chapters[temp];
-        while (chapter.hasContent == 0) {
-          temp -= 1;
-          if (temp < 0) {
-            return;
-          }
-          chapter = chapters[temp];
-        }
-      }
-      justDown(temp, temp + 1);
-    } else {
-      var chapter = chapters[_bookTag.cur];
-      while (chapter.hasContent == 0) {
-        if (g == 1) {
-          int tem = _bookTag.cur + 1;
-          if (tem >= chapters.length) {
-            Toast.show('已经是最后一页');
-            return;
-          } else {
-            _bookTag.cur += 1;
-          }
-        } else {
-          int tem = _bookTag.cur - 1;
-          if (tem < 0) {
-            _bookTag.cur += 1;
-            Toast.show('已经是第一页');
-            return;
-          } else {
-            _bookTag.cur -= 1;
-          }
-        }
-        chapter = chapters[_bookTag.cur];
-      }
-      int i = _bookTag.cur;
-      int id = chapters[i].id;
-      if (SpUtil.haveKey(id.toString())) {
-        _bookTag.content = SpUtil.getString(id.toString());
-        if (SpUtil.haveKey('pages' + chapters[i].id.toString())) {
-          _bookTag.pageOffsets =
-              SpUtil.getString('pages' + chapters[i].id.toString())
-                  .split('-')
-                  .map((f) => int.parse(f))
-                  .toList();
-        } else {
-          _bookTag.pageOffsets = ReaderPageAgent.getPageOffsets(
-              SpUtil.getString(id.toString()), contentH, contentW, fontSize);
-        }
-      } else {
-        var url = Common.bookContentUrl +
-            _bookInfo.Id.toString() +
-            "/" +
-            id.toString() +
-            ".html";
-        Response response = await Util(context).http().get(url);
-        String content = jsonDecode(response.data)['data']['content'];
-        content = content.replaceAll("\r\n　　\r\n", "\n");
-        if (content.startsWith('\n') || content.startsWith('\r\n')) {
-          content = content.substring(1).trim();
-        }
-        if (content.startsWith('\r\n')) {
-          content = content.substring(2).trim();
-        }
-        _bookTag.content = content;
-        SpUtil.putString(id.toString(), content);
-        _bookTag.pageOffsets = ReaderPageAgent.getPageOffsets(
-            content, contentH, contentW, fontSize);
-        SpUtil.putString('pages' + chapters[i].id.toString(),
-            _bookTag.pageOffsets.join('-'));
-        chapters[i].hasContent = 2;
-      }
-//上一章 需要显示 不是第一章
-      if (g == 0 && f == 1 && _bookTag.cur > 0) {
-        _bookTag.index = _bookTag.pageOffsets.length - 1;
-        fix = !fix;
-      }
-      if (mounted) {
-        setState(() {});
-      }
-      _pageController.jumpToPage(_bookTag.index);
+  Future<void> getChapters() async {
+    if (_bookInfo.sourceId == 'legacy') {
+      if (chapters.isEmpty) throw SourceException('旧版书源已失效，请在新书源中重新搜索。');
+      return;
+    }
+    try {
+      final currentId = chapters.isNotEmpty ? chapters[_bookTag.cur].id : null;
+      final data =
+          await BookSources.instance.chapters(_bookInfo.sourceId, _bookInfo.Id);
+      if (!mounted) return;
+      chapters = data.map((c) {
+        final chapter = Chapter.fromJson(c);
+        if (SpUtil.haveKey(contentKey(chapter.id))) chapter.hasContent = 2;
+        return chapter;
+      }).toList();
+      _bookTag.chapters = chapters;
+      final restored = chapters.indexWhere((c) => c.id == currentId);
+      _bookTag.cur = _bookInfo.CId == -1
+          ? chapters.length - 1
+          : restored < 0
+              ? 0
+              : restored;
+      if (_bookInfo.CId == -1 || restored < 0) _bookTag.index = 0;
+      value = _bookTag.cur.toDouble();
+      SpUtil.putString(chaptersKey, jsonEncode(chapters));
+    } catch (_) {
+      if (chapters.isEmpty) rethrow;
     }
   }
 
-  justDown(start, end) async {
-    for (var i = start; i < end;) {
-      Chapter cpt = chapters[i];
-      if ((!SpUtil.haveKey(cpt.id.toString())) && cpt.hasContent != 0) {
-        var url = Common.bookContentUrl +
-            _bookInfo.Id.toString() +
-            "/" +
-            cpt.id.toString() +
-            ".html";
-        Response response = await Util(null).http().get(url);
-        String content = jsonDecode(response.data)['data']['content'];
-        content = content
-            .replaceAll("\r\n　　\r\n", "\n")
-            .replaceAll('“', '')
-            .replaceAll('”', '');
-        if (content.startsWith("\r\n")) {
-          content = content.substring(4).trim();
-        }
-        if (content.startsWith('\n')) {
-          content = content.substring(1);
-        }
-        SpUtil.putString(cpt.id.toString(), content);
-        SpUtil.putString(
-            'pages' + chapters[i].id.toString(),
-            ReaderPageAgent.getPageOffsets(
-                    content, contentH, contentW, fontSize)
-                .join('-'));
-        chapters[i].hasContent = 2;
-        print('${chapters[i].name} 下载成功');
+  Future<void> loadChapter(int flag) async {
+    await getBookChapter(1, flag == 1 ? 1 : 0);
+    if (mounted) value = _bookTag.cur.toDouble();
+  }
+
+  Future<void> getBookChapter(int f, int g) async {
+    if (loading || !mounted || chapters.isEmpty) return;
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      while (chapters[_bookTag.cur].hasContent == 0) {
+        final next = _bookTag.cur + (g == 1 ? 1 : -1);
+        if (next < 0 || next >= chapters.length) return;
+        _bookTag.cur = next;
       }
-      i++;
+      final c = chapters[_bookTag.cur];
+      final key = contentKey(c.id);
+      final text = SpUtil.haveKey(key)
+          ? SpUtil.getString(key)
+          : await BookSources.instance
+              .content(_bookInfo.sourceId, _bookInfo.Id, c.id);
+      if (!mounted) return;
+      final offsets =
+          ReaderPageAgent.getPageOffsets(text, contentH, contentW, fontSize);
+      if (offsets.isEmpty) throw SourceException('这一章没有可显示的正文。');
+      await SpUtil.putString(key, text);
+      _bookTag.content = text;
+      _bookTag.pageOffsets = offsets;
+      c.hasContent = 2;
+      if (g == 0) {
+        _bookTag.index = offsets.length - 1;
+      }
+      _bookTag.index = _bookTag.index.clamp(0, offsets.length - 1).toInt();
+      if (_pageController.hasClients) {
+        _pageController.jumpToPage(_bookTag.index);
+      } else {
+        _pageController.dispose();
+        _pageController = MyPageController(initialPage: _bookTag.index);
+      }
+      SpUtil.putString(recordKey, jsonEncode(_bookTag));
+    } catch (e) {
+      if (mounted)
+        setState(() {
+          error = '$e';
+        });
+    } finally {
+      if (mounted)
+        setState(() {
+          loading = false;
+        });
+    }
+  }
+
+  Future<void> justDown(int start, int end) async {
+    if (downloading) return;
+    downloading = true;
+    try {
+      for (var i = start; i < end && mounted; i++) {
+        final c = chapters[i];
+        if (c.hasContent == 0) continue;
+        final key = contentKey(c.id);
+        if (!SpUtil.haveKey(key)) {
+          final text = await BookSources.instance
+              .content(_bookInfo.sourceId, _bookInfo.Id, c.id);
+          await SpUtil.putString(key, text);
+          await Future<void>.delayed(Duration(milliseconds: 500));
+        }
+        c.hasContent = 2;
+      }
+      if (mounted) Toast.show('缓存完成');
+    } catch (e) {
+      if (mounted) Toast.show('缓存已保留。$e');
+    } finally {
+      SpUtil.putString(chaptersKey, jsonEncode(chapters));
+      downloading = false;
     }
   }
 
 //prepage
   prePage() {
+    if (loading) return;
     var temp = _bookTag.index - 1;
     if (temp >= 0) {
       _bookTag.index = temp;
@@ -354,6 +301,7 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
 
   //nextpage
   nextPage() {
+    if (loading) return;
     var temp = _bookTag.index + 1;
     if (temp < _bookTag.pageOffsets.length) {
       _bookTag.index = temp;
@@ -515,9 +463,8 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
                                                   ),
                                                 ),
                                                 onTap: () {
-                                                  scheduleMicrotask(justDown(
-                                                      _bookTag.cur,
-                                                      chapters.length));
+                                                  justDown(_bookTag.cur,
+                                                      chapters.length);
                                                   Navigator.pop(context);
                                                 },
                                               ),
@@ -535,8 +482,7 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
                                                   ),
                                                 ),
                                                 onTap: () {
-                                                  scheduleMicrotask(justDown(
-                                                      0, chapters.length));
+                                                  justDown(0, chapters.length);
                                                   Navigator.pop(context);
                                                 },
                                               ),
@@ -653,19 +599,19 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
                                   ),
                                 ),
                                 onTap: () async {
-                                  String url =
-                                      Common.bookInfo + '${_bookInfo.Id}.html';
-
-                                  Response future =
-                                      await Util(context).http().get(url);
-
-                                  var data = jsonDecode(future.data)['data'];
-                                  BookInfo bookInfo =
-                                      new BookInfo.fromJson(data);
-                                  Navigator.of(context).push(
-                                      new MaterialPageRoute(
-                                          builder: (BuildContext context) =>
-                                              BookDetail(bookInfo)));
+                                  try {
+                                    final data = await BookSources.instance
+                                        .detail(
+                                            _bookInfo.sourceId, _bookInfo.Id);
+                                    final bookInfo = BookInfo.fromJson(data);
+                                    if (!mounted) return;
+                                    Navigator.of(context).push(
+                                        new MaterialPageRoute(
+                                            builder: (BuildContext context) =>
+                                                BookDetail(bookInfo)));
+                                  } catch (e) {
+                                    if (mounted) Toast.show('$e');
+                                  }
                                 },
                               ),
                             ),
@@ -688,12 +634,14 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
     });
   }
 
-  reCalcPages() {
-    SpUtil.getKeys().forEach((f) {
-      if (f.startsWith('pages')) {
-        SpUtil.remove(f);
-      }
-    });
+  void reCalcPages() {
+    if (_bookTag.content == null) return;
+    _bookTag.pageOffsets = ReaderPageAgent.getPageOffsets(
+        _bookTag.content, contentH, contentW, fontSize);
+    _bookTag.index =
+        _bookTag.index.clamp(0, _bookTag.pageOffsets.length - 1).toInt();
+    if (_pageController.hasClients) _pageController.jumpToPage(_bookTag.index);
+    if (mounted) setState(() {});
   }
 
   List<Widget> readThemes() {
@@ -727,6 +675,27 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    if (error != null)
+      return Scaffold(
+          appBar: AppBar(title: Text(_bookInfo.Name)),
+          body: Center(
+              child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text(error),
+                    FlatButton(
+                        onPressed: () {
+                          setState(() {
+                            error = null;
+                          });
+                          asyncInit();
+                        },
+                        child: Text('重试'))
+                  ]))));
+    if (!initialized || chapters.isEmpty || _bookTag.content == null)
+      return Scaffold(
+          appBar: AppBar(title: Text(_bookInfo.Name)),
+          body: Center(child: CircularProgressIndicator()));
     // TODO: implement build
     return Scaffold(
       key: _globalKey,
@@ -749,11 +718,9 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
               //条目个数
               itemCount: _bookTag.pageOffsets.length,
               onPageChanged: (i) {
-                if (fix) {
+                if (!loading) {
                   _bookTag.index = i;
                   setState(() {});
-                } else {
-                  fix = !fix;
                 }
               },
             ),
@@ -765,7 +732,7 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
                 left: 10,
                 right: 10,
                 bottom: 1,
-                top: ScreenUtil.getStatusBarH(context) - 1),
+                top: ScreenUtil.getStatusBarH(context)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
@@ -832,6 +799,7 @@ class _ReadBookState extends State<ReadBook> with WidgetsBindingObserver {
   }
 
   _changePage(int page) {
+    if (loading) return;
     if (page > 0) {
       nextPage();
     } else {

@@ -1,7 +1,10 @@
 import 'package:json_annotation/json_annotation.dart';
 part 'Book.g.dart';
+
 @JsonSerializable()
 class Book {
+  @JsonKey(ignore: true)
+  String sourceId = 'legacy';
 
   int ChapterId;
   String ChapterName;
@@ -14,9 +17,10 @@ class Book {
   String LastChapter;
   String UpdateTime;
 
-  factory Book.fromJson(Map<String, dynamic> json) => _$BookFromJson(json);
+  factory Book.fromJson(Map<String, dynamic> json) =>
+      _$BookFromJson(json)..sourceId = json['sourceId'] as String ?? 'legacy';
 
-  Map<String, dynamic> toJson() => _$BookToJson(this);
+  Map<String, dynamic> toJson() => _$BookToJson(this)..['sourceId'] = sourceId;
 
   Book(
       this.ChapterId,

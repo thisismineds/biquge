@@ -33,26 +33,9 @@ class _PersonCenter extends State<PersonCenter>
 
     final personbody =
         ListView(padding: const EdgeInsets.only(), children: <Widget>[
-      UserAccountsDrawerHeader(
-//      margin: EdgeInsets.zero,
-        accountName: Text(
-          SpUtil.getString('username'),
-        ),
-        accountEmail: Text(
-          SpUtil.haveKey('email') ? SpUtil.getString('email') : '点击头像登陆/注册',
-        ),
-        currentAccountPicture: GestureDetector(
-          child: CircleAvatar(
-            backgroundImage: AssetImage("images/fu.png"),
-          ),
-          onTap: () {
-            if (!SpUtil.haveKey('email')) {
-              Navigator.of(context).push(MaterialPageRoute(
-                  builder: (BuildContext context) => Login()));
-            }
-          },
-        ),
-      ),
+      UserAccountsDrawerHeader(accountName: Text('本地书架'),
+        accountEmail: Text('无需登录，书籍和阅读进度保存在此设备'),
+        currentAccountPicture: CircleAvatar(backgroundImage: AssetImage('images/fu.png'))),
       Store.connect<ColorModel>(
           builder: (context, ColorModel data, child) => ListTile(
                 leading: CircleAvatar(
@@ -174,23 +157,6 @@ class _PersonCenter extends State<PersonCenter>
                   ));
         },
       ),
-      SpUtil.haveKey('login')
-          ? MaterialButton(
-              child: Text('退出登录'),
-              onPressed: () {
-                SpUtil.remove('username');
-                SpUtil.remove('login');
-                SpUtil.remove('email');
-
-                List books = jsonDecode(SpUtil.getString(Common.listbookname));
-                Util(null).delLocalCache(
-                    books.map((f) => Book.fromJson(f).Id.toString()).toList());
-                SpUtil.remove(Common.listbookname);
-
-                eventBus.fire(new BooksEvent([]));
-              },
-            )
-          : Container()
     ]);
 
     return Scaffold(

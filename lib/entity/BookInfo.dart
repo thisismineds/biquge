@@ -7,6 +7,8 @@ part 'BookInfo.g.dart';
 
 @JsonSerializable()
 class BookInfo {
+  @JsonKey(ignore: true)
+  String sourceId = 'legacy';
   String Author;
   String BookStatus;
   BookVotec BookVote;
@@ -23,17 +25,29 @@ class BookInfo {
   List<Book> SameUserBooks;
 
   factory BookInfo.fromJson(Map<String, dynamic> json) =>
-      _$BookInfoFromJson(json);
+      _$BookInfoFromJson(json)
+        ..sourceId = json['sourceId'] as String ?? 'legacy';
 
-  Map<String, dynamic> toJson() => _$BookInfoToJson(this);
+  Map<String, dynamic> toJson() =>
+      _$BookInfoToJson(this)..['sourceId'] = sourceId;
 
   BookInfo.id(this.Id, this.Name);
 
   BookInfo.name(this.CId, this.Name);
 
-  BookInfo(this.Author, this.BookStatus, this.BookVote, this.CId, this.CName,
-      this.Id, this.Name, this.Img, this.Desc, this.LastChapterId,
-      this.LastChapter, this.FirstChapterId, this.LastTime,
+  BookInfo(
+      this.Author,
+      this.BookStatus,
+      this.BookVote,
+      this.CId,
+      this.CName,
+      this.Id,
+      this.Name,
+      this.Img,
+      this.Desc,
+      this.LastChapterId,
+      this.LastChapter,
+      this.FirstChapterId,
+      this.LastTime,
       this.SameUserBooks);
-
 }

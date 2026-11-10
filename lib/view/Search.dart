@@ -1,20 +1,12 @@
-import 'dart:convert';
-
-import 'package:PureBook/common/common.dart';
-import 'package:PureBook/common/util.dart';
+import 'package:PureBook/service/book_sources.dart';
 import 'package:PureBook/entity/BookInfo.dart';
-import 'package:PureBook/entity/SearchItem.dart';
 import 'package:PureBook/model/SearchModel.dart';
 import 'package:PureBook/store/Store.dart';
 import 'package:PureBook/view/MySearchDelegate.dart';
-import 'package:dio/dio.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:pull_to_refresh/pull_to_refresh.dart';
+import 'package:flustars/flustars.dart';
 
 import 'BookDetail.dart';
-
-String urlAdd = "https://shuapi.jiaston.com/BookAction.aspx";
 
 class SearchBarDelegate extends MySearchDelegate<String> {
   @override
@@ -80,6 +72,7 @@ class SearchBarDelegate extends MySearchDelegate<String> {
                   mainAxisAlignment: MainAxisAlignment.start,
                   children: <Widget>[
                     FlatButton(
+                      onPressed: null,
                       child: Text(
                         '搜索历史',
                         style: TextStyle(color: Colors.black),
@@ -129,181 +122,139 @@ class SearchBarDelegate extends MySearchDelegate<String> {
 }
 
 class SearchResult extends StatefulWidget {
-  String word;
-
+  final String word;
   SearchResult(this.word);
-
   @override
-  State<StatefulWidget> createState() {
-    // TODO: implement createState
-    return _SearchResultState();
-  }
+  _SearchResultState createState() => _SearchResultState();
 }
 
-class _SearchResultState extends State<SearchResult>
-    with AutomaticKeepAliveClientMixin {
-  List<SearchItem> bks = [];
-  int page = 1;
-  Widget body;
-  RefreshController _refreshController =
-      RefreshController(initialRefresh: false);
-
-  void _onRefresh() async {
-    bks = [];
-    page = 1;
-    getSearchData();
-    if (mounted) {
-      setState(() {});
-    }
-    _refreshController.refreshCompleted();
-  }
-
-  void _onLoading() async {
-    page += 1;
-    getSearchData();
-    _refreshController.loadComplete();
-    if (mounted) setState(() {});
-  }
+class _SearchResultState extends State<SearchResult> {
+  String sourceId = BookSources.activeId;
+  List<Map<String, dynamic>> items = [];
+  int page = 1, generation = 0;
+  bool loading = false, hasMore = true;
+  String error;
 
   @override
   void initState() {
-    // TODO: implement initState
     super.initState();
-    getSearchData();
+    load(reset: true);
   }
 
-  getSearchData() async {
-    var _context = null;
-    if (bks.length==0) {
-      _context = context;
-    }
-    var url = '${Common.search}?key=${this.widget.word}&page=$page&siteid=app2';
+  @override
+  void didUpdateWidget(SearchResult oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.word != widget.word) load(reset: true);
+  }
 
-    Response res = await Util(_context).http().get(url);
-    List data = jsonDecode(res.data)['data'];
-    if (data.length == 0) {
-      _refreshController.loadNoData();
-    } else {
-      data.forEach((f) {
-        bks.add(SearchItem.fromJson(f));
+  Future<void> load({bool reset = false}) async {
+    if (loading && !reset) return;
+    final request = ++generation;
+    final nextPage = reset ? 1 : page + 1;
+    setState(() {
+      loading = true;
+      error = null;
+      if (reset) items = [];
+    });
+    try {
+      final data =
+          await BookSources.instance.search(sourceId, widget.word, nextPage);
+      if (!mounted || request != generation) return;
+      setState(() {
+        items.addAll(data);
+        page = nextPage;
+        hasMore = data.isNotEmpty && sourceId != 'bqg631';
       });
-      if (mounted) {
-        setState(() {});
-      }
+    } catch (e) {
+      if (mounted && request == generation)
+        setState(() {
+          error = '$e';
+        });
+    } finally {
+      if (mounted && request == generation)
+        setState(() {
+          loading = false;
+        });
+    }
+  }
+
+  Future<void> open(Map<String, dynamic> item) async {
+    try {
+      final data = await BookSources.instance
+          .detail(item['sourceId'], int.parse(item['Id']));
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => BookDetail(BookInfo.fromJson(data))));
+    } catch (e) {
+      if (mounted)
+        showDialog(
+            context: context,
+            builder: (_) => AlertDialog(
+                    title: Text('暂时无法打开'),
+                    content: Text('$e'),
+                    actions: [
+                      FlatButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: Text('确定'))
+                    ]));
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    // TODO: implement build
-    return SmartRefresher(
-      enablePullDown: true,
-      enablePullUp: true,
-      header: WaterDropHeader(),
-      footer: CustomFooter(
-        builder: (BuildContext context, LoadStatus mode) {
-          if (mode == LoadStatus.idle) {
-          } else if (mode == LoadStatus.loading) {
-            body = CupertinoActivityIndicator();
-          } else if (mode == LoadStatus.failed) {
-            body = Text("加载失败！点击重试！");
-          } else if (mode == LoadStatus.canLoading) {
-            body = Text("松手,加载更多!");
-          } else {
-            body = Text("到底了!");
-          }
-          return Center(
-            child: body,
-          );
-        },
-      ),
-      controller: _refreshController,
-      onRefresh: _onRefresh,
-      onLoading: _onLoading,
-      child: bks.length == 0
-          ? Container()
-          : ListView.builder(
-              itemBuilder: (context, i) {
-                var auth = bks[i].Author;
-                var cate = bks[i].CName;
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  child: Row(
-                    children: <Widget>[
-                      Column(
-                        mainAxisAlignment: MainAxisAlignment.start,
-                        children: <Widget>[
-                          new Container(
-                            padding:
-                                const EdgeInsets.only(left: 10.0, top: 10.0),
-                            child: new Image.network(
-                              bks[i].Img,
-                              height: 100,
-                              width: 80,
+  Widget build(BuildContext context) => Column(children: [
+        Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              Text('书源：'),
+              Expanded(
+                  child: DropdownButton<String>(
+                      value: sourceId,
+                      isExpanded: true,
+                      items: BookSources.sources
+                          .map((s) => DropdownMenuItem(
+                              value: s.id, child: Text(s.name)))
+                          .toList(),
+                      onChanged: (id) {
+                        setState(() {
+                          sourceId = id;
+                          BookSources.activeId = id;
+                        });
+                        SpUtil.putString('activeSourceId', id);
+                        load(reset: true);
+                      })),
+            ])),
+        if (loading) LinearProgressIndicator(),
+        if (error != null)
+          Padding(
+              padding: EdgeInsets.all(16),
+              child: Column(children: [
+                Text(error),
+                FlatButton(
+                    onPressed: () => load(reset: items.isEmpty),
+                    child: Text('重试'))
+              ])),
+        Expanded(
+            child: items.isEmpty && !loading && error == null
+                ? Center(child: Text('没有找到书籍，可以切换书源再试。'))
+                : ListView.builder(
+                    itemCount:
+                        items.length + (hasMore && items.isNotEmpty ? 1 : 0),
+                    itemBuilder: (context, i) {
+                      if (i == items.length)
+                        return FlatButton(
+                            onPressed: loading ? null : () => load(),
+                            child: Text('加载更多'));
+                      final b = items[i];
+                      return ListTile(
+                          leading: Image.network(b['Img'],
+                              width: 48,
                               fit: BoxFit.cover,
-                            ),
-                          )
-                        ],
-                      ),
-                      Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.max,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        verticalDirection: VerticalDirection.down,
-                        // textDirection:,
-                        textBaseline: TextBaseline.alphabetic,
-
-                        children: <Widget>[
-                          Container(
-                            padding:
-                                const EdgeInsets.only(left: 10.0, top: 10.0),
-                            child: new Text(
-                              bks[i].Name,
-                              style: TextStyle(fontSize: 15),
-                            ),
-                          ),
-                          Container(
-                            padding:
-                                const EdgeInsets.only(left: 10.0, top: 10.0),
-                            child: new Text('$cate | $auth',
-                                style: TextStyle(
-                                    fontSize: 14, color: Colors.grey)),
-                          ),
-                          Container(
-                            padding:
-                                const EdgeInsets.only(left: 10.0, top: 10.0),
-                            child: new Text(bks[i].Desc,
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 2,
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.grey)),
-                            width: 270,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  onTap: () async {
-                    String url =
-                        'https://shuapi.jiaston.com/info/${bks[i].Id}.html';
-
-                    Response future = await Util(context).http().get(url);
-
-                    var data = jsonDecode(future.data)['data'];
-                    BookInfo bookInfo = new BookInfo.fromJson(data);
-                    Navigator.of(context).push(new MaterialPageRoute(
-                        builder: (BuildContext context) =>
-                            new BookDetail(bookInfo)));
-                  },
-                );
-              },
-              itemCount: bks.length,
-            ),
-    );
-  }
-
-  @override
-  // TODO: implement wantKeepAlive
-  bool get wantKeepAlive => true;
+                              errorBuilder: (_, __, ___) => Icon(Icons.book)),
+                          title: Text(b['Name']),
+                          subtitle: Text('${b['Author']}\n${b['Desc']}',
+                              maxLines: 3, overflow: TextOverflow.ellipsis),
+                          isThreeLine: true,
+                          onTap: () => open(b));
+                    })),
+      ]);
 }

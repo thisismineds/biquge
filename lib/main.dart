@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:PureBook/entity/Book.dart';
 import 'package:PureBook/model/ColorModel.dart';
 import 'package:PureBook/service/TelAndSmsService.dart';
+import 'package:PureBook/service/book_sources.dart';
 import 'package:PureBook/store/Store.dart';
 import 'package:PureBook/view/BookShelf.dart';
 import 'package:PureBook/view/PersonCenter.dart';
@@ -21,6 +22,10 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SpUtil.getInstance();
   await DirectoryUtil.getInstance();
+  final savedSource = SpUtil.getString('activeSourceId');
+  if (BookSources.sources.any((s) => s.id == savedSource)) {
+    BookSources.activeId = savedSource;
+  }
 
   locator.registerSingleton(TelAndSmsService());
   runApp(Store.init(child: MyApp()));
@@ -66,7 +71,7 @@ class _MainPageState extends State<MainPage> {
           AssetImage("images/rank.png"),
         ),
         title: Text(
-          '排行榜',
+          '书源',
         )),
   ];
 
