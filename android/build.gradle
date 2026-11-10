@@ -1,29 +1,16 @@
-buildscript {
-    repositories {
-        google()
-        jcenter()
-    }
-
-    dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.2'
-    }
-}
-
 allprojects {
     repositories {
         google()
-        jcenter()
+        mavenCentral()
     }
 }
 
-rootProject.buildDir = '../build'
+rootProject.layout.buildDirectory = file('../build')
 subprojects {
-    project.buildDir = "${rootProject.buildDir}/${project.name}"
-}
-subprojects {
-    project.evaluationDependsOn(':app')
+    layout.buildDirectory = rootProject.layout.buildDirectory.dir(project.name)
+    evaluationDependsOn(':app')
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
 }

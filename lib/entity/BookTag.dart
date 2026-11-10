@@ -1,40 +1,39 @@
-import 'package:PureBook/entity/Chapter.dart';
-import 'package:json_annotation/json_annotation.dart';
+import 'Chapter.dart';
 
-part 'BookTag.g.dart';
-
-@JsonSerializable()
 class BookTag {
   List<int> pageOffsets = [];
-
-  String content;
-
-  String stringAtPageIndex(int index) {
-
-    return this.content.substring(index-1==-1?0:pageOffsets[index-1], pageOffsets[index]);
-  }
-
-  int get pageCount {
-    return pageOffsets.length;
-  }
-
-
-
-  String name = "";
-  int cur;
-  int index;
+  String? content;
+  String name = '';
+  int cur = 0;
+  int index = 0;
   List<Chapter> chapters;
-
-  factory BookTag.fromJson(Map<String, dynamic> json) =>
-      _$BookTagFromJson(json);
-
-  Map<String, dynamic> toJson() => _$BookTagToJson(this);
 
   BookTag(this.cur, this.index, this.chapters, this.name);
 
-  @override
-  String toString() {
-    return 'BookTag{pageOffsets: $pageOffsets, content: $content, name: $name, cur: $cur, index: $index, chapters: $chapters}';
-  }
+  String stringAtPageIndex(int index) => (content ?? '')
+      .substring(index == 0 ? 0 : pageOffsets[index - 1], pageOffsets[index]);
 
+  int get pageCount => pageOffsets.length;
+
+  factory BookTag.fromJson(Map<String, dynamic> json) => BookTag(
+        json['cur'] as int? ?? 0,
+        json['index'] as int? ?? 0,
+        (json['chapters'] as List? ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(Chapter.fromJson)
+            .toList(),
+        json['name'] as String? ?? '',
+      )
+        ..pageOffsets =
+            (json['pageOffsets'] as List? ?? []).cast<int>().toList()
+        ..content = json['content'] as String?;
+
+  Map<String, dynamic> toJson() => {
+        'pageOffsets': pageOffsets,
+        'content': content,
+        'name': name,
+        'cur': cur,
+        'index': index,
+        'chapters': chapters.map((chapter) => chapter.toJson()).toList(),
+      };
 }

@@ -1,0 +1,27 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - lib/view/**
+    - lib/common/**
+    - lib/store/**
+    - lib/model/**
+    - lib/action/**
+    - lib/event/**
+    - lib/route/**
+    - lib/service/TelAndSmsService.dart
+    - lib/entity/*.g.dart
+    - lib/entity/BookVotec.dart
+    - lib/entity/ChapterList.dart
+    - lib/entity/SearchItem.dart
+    - lib/entity/TopBook.dart
+    - lib/entity/TopResult.dart
+    - build/**
+    - android/**
+    - ios/**
+
+linter:
+  rules:
+    # Retained field names are the existing on-device JSON contract.
+    non_constant_identifier_names: false
+    file_names: false

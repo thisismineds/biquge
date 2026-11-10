@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-10T14:10:24.2839597+08:00",
+  "title": "Design System: 清阅",
+  "extensions": {
+    "colorMeta": {
+      "forest": {
+        "role": "primary",
+        "displayName": "墨绿"
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "米白纸面"
+      },
+      "reading-night": {
+        "role": "neutral",
+        "displayName": "保留的夜间阅读背景"
+      }
+    },
+    "typographyMeta": {
+      "reading-body": {
+        "displayName": "中文正文",
+        "purpose": "用户要求优先优化的长篇段落；继承设备中文字体回退并随系统文字缩放。"
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "reader-page-turn",
+        "value": "180ms easeOutCubic",
+        "purpose": "按钮触发 PageController 翻页；系统关闭动画时为零时长。其他控件继承 Material 默认值。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "navigation-rail",
+        "value": "650dp"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Tonal continue-reading action",
+      "kind": "button",
+      "description": "Material FilledButton.tonal 的角色示意；原生运行时的形状和交互以 Flutter Material 3 为准。",
+      "html": "<button class=\"ds-continue\">继续阅读</button>",
+      "css": ".ds-continue{background:#DCE5D9;color:#254F43;border:0;border-radius:24px;padding:12px 24px;font:500 14px system-ui;min-height:48px}.ds-continue:hover{filter:brightness(.97)}.ds-continue:focus-visible{outline:2px solid #254F43;outline-offset:3px}.ds-continue:active{filter:brightness(.93)}"
+    },
+    {
+      "name": "Search input",
+      "kind": "input",
+      "refersTo": "search-input",
+      "description": "原生搜索框的形状示意；实际填充和状态取 ColorScheme.surfaceContainerLow 及 Material 输入主题。",
+      "html": "<label class=\"ds-search-label\">搜索小说<input class=\"ds-search\" placeholder=\"书名或作者\"></label>",
+      "css": ".ds-search-label{display:grid;gap:8px;color:#254F43;font:14px system-ui}.ds-search{border:0;border-radius:14px;padding:16px;font:16px system-ui;background:#F7F5EF;color:#30372E}.ds-search:hover{filter:brightness(.98)}.ds-search:focus-visible{outline:2px solid #254F43;outline-offset:2px}"
+    },
+    {
+      "name": "Three destinations",
+      "kind": "nav",
+      "refersTo": "navigation-bar",
+      "description": "目的地与选中容器色的静态示意；原生 NavigationBar / Rail 使用 Material Icons，650dp 切换 Rail。",
+      "html": "<nav class=\"ds-nav\" aria-label=\"主导航\"><button class=\"ds-destination\" aria-current=\"page\">书架</button><button class=\"ds-destination\">书源</button><button class=\"ds-destination\">设置</button></nav>",
+      "css": ".ds-nav{display:flex;justify-content:space-around;gap:8px;padding:12px;background:#F7F5EF}.ds-destination{font:14px system-ui;color:#254F43;background:transparent;border:0;border-radius:24px;min-height:48px;padding:12px 24px}.ds-destination[aria-current]{background:#E5EAE0}.ds-destination:hover{filter:brightness(.96)}.ds-destination:focus-visible{outline:2px solid #254F43;outline-offset:2px}.ds-destination:active{background:#DCE5D9}"
+    },
+    {
+      "name": "Chinese reading page",
+      "kind": "custom",
+      "refersTo": "reader-page",
+      "description": "正文默认字号、行距、段距和页边距的静态示意；浏览器不模拟 Flutter TextPainter 的分页及设备中文回退。",
+      "html": "<article class=\"ds-reading\" lang=\"zh-CN\"><p>　　清晨的风穿过山间，远处传来一声鸟鸣。她翻开书页，继续昨日未读完的故事。</p><p>　　窗边的光渐渐明亮，纸上的文字清晰而安静。</p></article>",
+      "css": ".ds-reading{background:#F6F2EA;color:#30372E;padding:24px;font:400 21px/1.75 system-ui;letter-spacing:.15px}.ds-reading p{margin:0}.ds-reading p+p{margin-top:12px}"
+    },
+    {
+      "name": "Night reading page",
+      "kind": "custom",
+      "refersTo": "reader-page-night",
+      "description": "保留的夜间背景与正文色；排版与亮色阅读共用同一设置。",
+      "html": "<article class=\"ds-night\" lang=\"zh-CN\"><p>　　夜色落在窗外，她将注意力重新放回故事。</p></article>",
+      "css": ".ds-night{background:#262626;color:#DCDDD3;padding:24px;font:400 21px/1.75 system-ui;letter-spacing:.15px}.ds-night p{margin:0}"
+    },
+    {
+      "name": "Text cover fallback",
+      "kind": "card",
+      "refersTo": "book-cover",
+      "description": "无远程封面时的文字回退。原生背景按书名在森林色与土色间稳定插值；此示意展示森林端点。",
+      "html": "<div class=\"ds-cover\" role=\"img\" aria-label=\"山间来信，示例封面\"><strong>山间来信</strong><span>清阅</span></div>",
+      "css": ".ds-cover{display:flex;flex-direction:column;justify-content:space-between;background:#334F43;color:#FFF9ED;border-radius:6px;padding:13px;width:100px;height:156px;font:500 17px/1.5 system-ui}.ds-cover strong{font-weight:500}.ds-cover span{border-top:1px solid #DDD3BB;padding-top:10px;color:#E6E0D0;font-size:10px}"
+    },
+    {
+      "name": "Spacing presets",
+      "kind": "chip",
+      "description": "独立 showSpacingSettings 面板从设置页和阅读设置进入。行段间距：小 1.35/4dp、较小 1.5/8dp、适中 1.75/12dp、大 2.0/20dp、自定义（行高 1.3–2.2，段距 4–24dp）；自定义滑块值与预设选择持久化并可恢复。页面边距：16/24/32/40dp 或智能 max(16, (width - min(width × .88, 560))/2)，360dp=>21.6dp，800dp=>120dp；章节栏、正文、页脚和分页共用有效边距。此静态示意不执行设置。",
+      "html": "<section class=\"ds-spacing\" aria-label=\"间距设置\"><h3>行段间距</h3><div class=\"ds-options\"><button>小</button><button>较小</button><button aria-pressed=\"true\">适中</button><button>大</button><button>自定义</button></div><h3>页面边距</h3><div class=\"ds-options\"><button>小</button><button aria-pressed=\"true\">适中</button><button>较大</button><button>大</button><button>智能匹配</button></div></section>",
+      "css": ".ds-spacing{font:14px system-ui;color:#30372E;background:#F7F5EF;padding:24px}.ds-spacing h3{font-weight:500}.ds-options{display:flex;flex-wrap:wrap;gap:4px 8px}.ds-options button{min-height:48px;padding:8px 16px;border:1px solid #254F43;border-radius:8px;background:transparent;color:#254F43;font:inherit}.ds-options button[aria-pressed=true]{background:#DCE5D9}.ds-options button:hover{filter:brightness(.96)}.ds-options button:focus-visible{outline:2px solid #254F43;outline-offset:2px}.ds-options button:active{background:#E5EAE0}"
+    }
+  ],
+  "narrative": {
+    "northStar": "把注意力留给故事",
+    "overview": "清阅是原生 Android 阅读应用。用户已选择米白纸感与墨绿色，并明确把中文正文排版列为优先事项。视觉表现克制、安静、清楚；段落、章节和阅读进度比装饰更重要。\n\nMaterial 3 提供导航、交互和状态，品牌通过颜色、留白和字重表达。本文记录当前 Flutter 实现，不引入新的视觉方向。数值以 Flutter 逻辑像素（dp）及随系统缩放的字号（sp）表达；未覆盖的角色继承 Flutter Material 3 默认值。",
+    "keyCharacteristics": [
+      "米白应用表面与墨绿操作色。",
+      "系统中文字体、明确的段落节奏和可调排版。",
+      "原生 Material 3 控件与按宽度适配的导航。",
+      "保留旧版五种阅读底色和独立夜间阅读底色。"
+    ],
+    "rules": [
+      {
+        "name": "The Reading Background Rule",
+        "body": "五个阅读底色的数值、顺序和 `bg_i` 映射必须保留，外壳换色不得改变用户已有阅读背景。",
+        "section": "colors"
+      },
+      {
+        "name": "The Measurement Parity Rule",
+        "body": "分页的 TextPainter 与绘制的 RichText 必须共用显式 TextStyle、系统 TextScaler、StrutStyle、`zh_CN` locale 和均匀 leading 的 TextHeightBehavior。正文样式为 `inherit: false`，字重 400，strut 不强制固定行盒高度；系统大字必须触发重排。",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do 把中文段落可读性放在装饰之前，并保留用户可调字号、行高、段间距和边距。",
+      "Do 保持分页测量与正文绘制的字体、缩放、strut 和中文 locale 一致。",
+      "Do 使用原生 Material 3 控件、系统中文字体和随宽度切换的导航。",
+      "Do 保留五种旧阅读背景的值、顺序、存储映射及夜间阅读底色。"
+    ],
+    "donts": [
+      "Don't 用新的外壳纸色覆盖用户已选阅读背景。",
+      "Don't 把系统大字固定为不缩放的像素，或用裁剪隐藏正文溢出。",
+      "Don't 把预览书籍、样例正文或模拟器截图描述为用户数据或真机验证。",
+      "Don't 添加未在现有实现中使用的装饰字体、插画或自定义控件风格。"
+    ]
+  }
+}

@@ -1,90 +1,102 @@
 import 'dart:convert';
+
 import 'package:dio/dio.dart';
-import 'package:flustars/flustars.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:PureBook/entity/BookInfo.dart';
-import 'package:PureBook/entity/BookTag.dart';
-import 'package:PureBook/entity/Chapter.dart';
-import 'package:PureBook/service/book_sources.dart';
-import 'package:PureBook/view/BookShelf.dart';
-import 'package:PureBook/view/ReadBook.dart';
-import 'package:PureBook/view/TopBook.dart';
-import 'package:PureBook/view/Search.dart';
-import 'package:PureBook/common/common.dart';
-import 'package:PureBook/store/Store.dart';
+import 'package:qingyue/main.dart';
+import 'package:qingyue/entity/BookInfo.dart';
+import 'package:qingyue/entity/BookTag.dart';
+import 'package:qingyue/entity/Chapter.dart';
+import 'package:qingyue/service/book_sources.dart';
+import 'package:qingyue/storage/app_store.dart';
+import 'package:qingyue/reader/reader_screen.dart';
+import 'package:qingyue/ui/search_screen.dart';
+
 import 'book_sources_test.dart' show FixtureAdapter, jsonBody;
 
 void main() {
-  setUpAll(() async {
-    TestWidgetsFlutterBinding.ensureInitialized();
+  Future<AppStore> storeWith(
+    Future<ResponseBody> Function(RequestOptions) respond,
+  ) async {
+    final client = Dio()..httpClientAdapter = FixtureAdapter(respond);
+    return AppStore(
+      await SharedPreferences.getInstance(),
+      sources: BookSources(client: client),
+    );
+  }
+
+  setUp(() {
     SharedPreferences.setMockInitialValues({});
-    await SpUtil.getInstance();
-  });
-  setUp(() async {
-    await SpUtil.clear();
-  });
-
-  testWidgets('local bookshelf and three sources work without legacy login',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(home: BookShelf()));
-    expect(find.text('书架还是空的，点击右上角搜索添加小说。'), findsOneWidget);
-    await tester.pumpWidget(MaterialApp(home: TopBook()));
-    expect(find.text('笔趣阁 631'), findsOneWidget);
-    expect(find.text('酷我小说'), findsOneWidget);
-    expect(find.text('新笔趣阁'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('cached book opens even when every API mirror fails',
-      (tester) async {
-    final original = BookSources.instance.client.httpClientAdapter;
-    BookSources.instance.client.httpClientAdapter =
-        FixtureAdapter((_) async => ResponseBody.fromString('', 503));
-    addTearDown(() {
-      BookSources.instance.client.httpClientAdapter = original;
-    });
-    final tag = BookTag(0, 4, [Chapter(2, 1, '第一章')], '缓存小说')
-      ..content = '离线正文。'
-      ..pageOffsets = [1, 2, 3, 4, 5];
-    await SpUtil.putString(BookSources.recordKey('bqg631', 1), jsonEncode(tag));
-    await SpUtil.putString(BookSources.contentKey('bqg631', 1, 1), '离线正文。');
-    final book = BookInfo.id(1, '缓存小说')..sourceId = 'bqg631';
-    await tester
-        .pumpWidget(Store.init(child: MaterialApp(home: ReadBook(book))));
-    await tester.pumpAndSettle();
-    expect(find.text('第一章'), findsOneWidget);
-    expect(find.text('离线正文。'), findsOneWidget);
-    expect(find.text('第1/1页'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(Container());
-    expect(SpUtil.getString(BookSources.contentKey('bqg631', 1, 1)), '离线正文。');
   });
 
   testWidgets(
-      'search opens details, adds the source to shelf and reads a chapter',
-      (tester) async {
-    // Flutter's test HttpClient rejects external cover images with status 400.
-    final reportError = FlutterError.onError;
+    'local bookshelf and source selection do not require legacy login',
+    (tester) async {
+      final store = await storeWith((_) async => jsonBody({'data': []}));
+      await tester.pumpWidget(ReaderApp(store: store));
+      expect(find.text('下一本好书，等你翻开'), findsOneWidget);
+      await tester.tap(find.text('书源').last);
+      await tester.pumpAndSettle();
+      expect(find.text('笔趣阁 631'), findsOneWidget);
+      expect(find.text('酷我小说'), findsOneWidget);
+      expect(find.text('新笔趣阁'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'cached old book opens with all sources offline and preserves background',
+    (tester) async {
+      final store = await storeWith(
+        (_) async => ResponseBody.fromString('', 503),
+      );
+      final tag = BookTag(0, 4, [Chapter(2, 7, '第一章')], '缓存小说')
+        ..content = '离线正文。'
+        ..pageOffsets = [1, 2, 3, 4, 5];
+      await store.preferences.setString('1', jsonEncode(tag));
+      await store.preferences.setString('1chapters', jsonEncode(tag.chapters));
+      await store.preferences.setString('7', '离线正文。');
+      final book = BookInfo.id(1, '缓存小说');
+      await tester.pumpWidget(
+        ReaderApp(
+          store: store,
+          home: ReaderScreen(store: store, book: book),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('第一章'), findsOneWidget);
+      expect(find.textContaining('离线正文。', findRichText: true), findsOneWidget);
+      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
+      expect(scaffold.backgroundColor, const Color(0xFFF6F2EA));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('search opens details and reads with source retained in shelf', (
+    tester,
+  ) async {
+    final previous = FlutterError.onError;
     FlutterError.onError = (details) {
-      final error = details.exception;
-      if (error is NetworkImageLoadException && error.statusCode == 400) return;
-      reportError(details);
+      if (details.exception is NetworkImageLoadException &&
+          (details.exception as NetworkImageLoadException).statusCode == 400) {
+        return;
+      }
+      previous?.call(details);
     };
     addTearDown(() {
-      FlutterError.onError = reportError;
+      FlutterError.onError = previous;
     });
-    BookSources.activeId = 'bqg631';
-    final original = BookSources.instance.client.httpClientAdapter;
-    BookSources.instance.client.httpClientAdapter = FixtureAdapter((o) async {
-      if (o.path.endsWith('/search'))
+    final store = await storeWith((o) async {
+      if (o.path.endsWith('/search')) {
         return jsonBody({
           'data': [
-            {'id': '1', 'title': '测试小说', 'author': '测试作者', 'intro': '说明'}
-          ]
+            {'id': '1', 'title': '测试小说', 'author': '测试作者', 'intro': '说明'},
+          ],
         });
-      if (o.path.endsWith('/book'))
+      }
+      if (o.path.endsWith('/book')) {
         return jsonBody({
           'id': '1',
           'title': '测试小说',
@@ -95,75 +107,76 @@ void main() {
           'dirid': '1',
           'lastchapterid': '1',
           'lastchapter': '第一章',
-          'lastupdate': '2026-11-10'
+          'lastupdate': '2026-11-10',
         });
-      if (o.path.endsWith('/booklist'))
+      }
+      if (o.path.endsWith('/booklist')) {
         return jsonBody({
-          'list': ['第一章']
+          'list': ['第一章'],
         });
+      }
       return jsonBody({'txt': '从搜索进入的正文。', 'chapterid': '1'});
     });
-    addTearDown(() {
-      BookSources.instance.client.httpClientAdapter = original;
-    });
-    await tester.pumpWidget(Store.init(
-        child: MaterialApp(home: Scaffold(body: SearchResult('测试')))));
+    await tester.pumpWidget(
+      ReaderApp(
+        store: store,
+        home: SearchScreen(store: store),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '测试');
+    await tester.tap(find.byTooltip('开始搜索'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('测试小说'));
+    await tester.tap(find.text('测试小说').last);
     await tester.pumpAndSettle();
-    expect(find.text('作者：测试作者'), findsOneWidget);
+    expect(find.text('测试作者'), findsOneWidget);
     await tester.tap(find.text('开始阅读'));
     await tester.pumpAndSettle();
-    expect(find.text('从搜索进入的正文。'), findsOneWidget);
-    final shelf = jsonDecode(SpUtil.getString(Common.listbookname)) as List;
-    expect(shelf.single['sourceId'], 'bqg631');
-    expect(shelf.single['Id'], 1);
+    expect(
+      find.textContaining('从搜索进入的正文。', findRichText: true),
+      findsOneWidget,
+    );
+    expect(store.shelf.single.sourceId, 'bqg631');
     expect(tester.takeException(), isNull);
-    await tester.pumpWidget(Container());
+    await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets(
-      'chapter transitions restore the previous last page and cached markers',
-      (tester) async {
-    final original = BookSources.instance.client.httpClientAdapter;
-    BookSources.instance.client.httpClientAdapter =
-        FixtureAdapter((o) async => jsonBody(o.path.endsWith('/book')
+  testWidgets('multi-page chapters move back to the previous last page', (
+    tester,
+  ) async {
+    final store = await storeWith(
+      (o) async => jsonBody(
+        o.path.endsWith('/book')
             ? {'dirid': '1'}
             : {
-                'list': ['第一章', '第二章']
-              }));
-    addTearDown(() {
-      BookSources.instance.client.httpClientAdapter = original;
-    });
-    await SpUtil.putString(BookSources.contentKey('bqg631', 1, 1),
-        List.filled(500, '甲乙丙丁。').join());
-    await SpUtil.putString(BookSources.contentKey('bqg631', 1, 2), '第二章正文。');
-    await tester.pumpWidget(Store.init(
-        child: MaterialApp(
-            home: ReadBook(BookInfo.id(1, '多章小说')..sourceId = 'bqg631'))));
+                'list': ['第一章', '第二章'],
+              },
+      ),
+    );
+    final book = BookInfo.id(1, '多章小说')..sourceId = 'bqg631';
+    await store.preferences.setString(
+      store.contentKey(book, 1),
+      List.filled(500, '甲乙丙丁。').join(),
+    );
+    await store.preferences.setString(store.contentKey(book, 2), '第二章正文。');
+    await tester.pumpWidget(
+      ReaderApp(
+        store: store,
+        home: ReaderScreen(store: store, book: book),
+      ),
+    );
     await tester.pumpAndSettle();
-    final dynamic reader = tester.state(find.byType(ReadBook));
-    for (var i = 0; i < 20 && find.text('第二章').evaluate().isEmpty; i++) {
-      reader.nextPage();
+    for (var i = 0; i < 30 && find.text('第二章').evaluate().isEmpty; i++) {
+      await tester.drag(find.byType(PageView), const Offset(-700, 0));
       await tester.pumpAndSettle();
     }
-    expect(find.text('第二章正文。'), findsOneWidget);
-    reader.prePage();
+    expect(find.textContaining('第二章正文。', findRichText: true), findsOneWidget);
+    await tester.drag(find.byType(PageView), const Offset(700, 0));
     await tester.pumpAndSettle();
-    final saved =
-        jsonDecode(SpUtil.getString(BookSources.recordKey('bqg631', 1)));
+    final saved = store.record(book)!;
     expect(saved['cur'], 0);
     expect(saved['index'], greaterThan(0));
     expect(saved['index'], (saved['pageOffsets'] as List).length - 1);
-    final pages = (saved['pageOffsets'] as List).length;
-    expect(find.text('第$pages/$pages页'), findsOneWidget);
-    final scaffold = tester.state<ScaffoldState>(find
-        .descendant(of: find.byType(ReadBook), matching: find.byType(Scaffold))
-        .first);
-    scaffold.openDrawer();
-    await tester.pumpAndSettle();
-    expect(find.text('已缓存'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
-    await tester.pumpWidget(Container());
+    await tester.pumpWidget(const SizedBox());
   });
 }

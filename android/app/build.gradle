@@ -1,55 +1,41 @@
-def localProperties = new Properties()
-def localPropertiesFile = rootProject.file('local.properties')
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.withReader('UTF-8') { reader ->
-        localProperties.load(reader)
-    }
+plugins {
+    id 'com.android.application'
+    id 'dev.flutter.flutter-gradle-plugin'
 }
 
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
-}
-
-def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
-if (flutterVersionCode == null) {
-    flutterVersionCode = '1'
-}
-
-def flutterVersionName = localProperties.getProperty('flutter.versionName')
-if (flutterVersionName == null) {
-    flutterVersionName = '1.0'
-}
-
-apply plugin: 'com.android.application'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
-
-def keystorePropertiesFile = rootProject.file("key.properties")
 def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
 }
+def debugKeystore = System.getenv('QINGYUE_DEBUG_KEYSTORE')
 
 android {
-    compileSdkVersion 28
+    namespace 'com.example.qingyue'
+    compileSdk flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
 
-    lintOptions {
-        disable 'InvalidPackage'
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId "com.example.qingyue"
-        minSdkVersion 16
-        targetSdkVersion 28
-        versionCode flutterVersionCode.toInteger()
-        versionName flutterVersionName
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        applicationId 'com.example.qingyue'
+        minSdk flutter.minSdkVersion
+        targetSdk flutter.targetSdkVersion
+        versionCode flutter.versionCode
+        versionName flutter.versionName
     }
 
     signingConfigs {
-        release {
-            if (keystorePropertiesFile.exists()) {
+        debug {
+            if (debugKeystore) {
+                storeFile file(debugKeystore)
+            }
+        }
+        if (keystoreProperties['storeFile']) {
+            release {
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
                 storeFile file(keystoreProperties['storeFile'])
@@ -59,20 +45,16 @@ android {
     }
     buildTypes {
         release {
-            signingConfig signingConfigs.release
-			minifyEnabled true
-            useProguard true
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Test upgrades must explicitly opt into the existing debug identity.
+            if (debugKeystore) {
+                signingConfig signingConfigs.debug
+            } else if (keystoreProperties['storeFile']) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
 
 flutter {
     source '../..'
-}
-
-dependencies {
-    testImplementation 'junit:junit:4.12'
-    androidTestImplementation 'androidx.test:runner:1.1.1'
-    androidTestImplementation 'androidx.test.espresso:espresso-core:3.1.1'
 }

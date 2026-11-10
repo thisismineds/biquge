@@ -175,6 +175,12 @@ gradle-app.setting
 
 # Files and directories created by pub
 .dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+ios/Flutter/ephemeral/
+.impeccable/review/
+.superpowers/
 .packages
 build/
 # If you're building an application, you may want to check-in your pubspec.lock
