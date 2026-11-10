@@ -339,8 +339,17 @@ class AppStore extends ChangeNotifier {
     if (cached != null && cached.trim().isNotEmpty) return cached;
     final text = await sources.content(b.sourceId, b.Id, chapter);
     await preferences.setString(contentKey(b, chapter), text);
+    notifyListeners();
     return text;
   }
+
+  bool hasCachedChapter(BookInfo book, int chapter) =>
+      preferences.getString(contentKey(book, chapter))?.trim().isNotEmpty ??
+      false;
+
+  int cachedChapterCount(BookInfo book, Iterable<Chapter> chapters) => chapters
+      .where((c) => c.hasContent > 0 && hasCachedChapter(book, c.id))
+      .length;
 
   Future<void> saveProgress(BookInfo b, BookTag tag, int textOffset) async {
     final data = tag.toJson()..['readerOffset'] = textOffset;

@@ -4,6 +4,7 @@ import '../entity/BookInfo.dart';
 import '../reader/reader_screen.dart';
 import '../storage/app_store.dart';
 import 'book_cover.dart';
+import 'cache_progress_button.dart';
 
 class BookDetails extends StatefulWidget {
   final AppStore store;
@@ -16,7 +17,7 @@ class BookDetails extends StatefulWidget {
 class _BookDetailsState extends State<BookDetails> {
   bool downloading = false;
   int cached = 0, total = 0;
-  String? message;
+  int downloadGeneration = 0;
   AppStore get store => widget.store;
   BookInfo get book => widget.book;
 
@@ -48,46 +49,65 @@ class _BookDetailsState extends State<BookDetails> {
 
   Future<void> download() async {
     if (downloading) {
+      downloadGeneration++;
       setState(() {
         downloading = false;
       });
+      _notice('缓存已暂停，已下载的章节会保留。');
       return;
     }
+    final generation = ++downloadGeneration;
     setState(() {
       downloading = true;
-      message = null;
+      cached = 0;
+      total = 0;
     });
     try {
       await store.add(book);
+      if (!mounted || generation != downloadGeneration) return;
       final chapters = await store.loadChapters(book);
-      total = chapters.length;
-      cached = 0;
+      if (!mounted || generation != downloadGeneration) return;
+      setState(() {
+        total = chapters.length;
+        cached = store.cachedChapterCount(book, chapters);
+      });
       for (final c in chapters) {
-        if (!mounted || !downloading) break;
+        if (!mounted || generation != downloadGeneration) return;
+        if (store.hasCachedChapter(book, c.id)) continue;
         await store.loadContent(book, c.id);
-        cached++;
-        if (mounted) setState(() {});
+        if (!mounted) return;
+        if (generation != downloadGeneration) {
+          if (!downloading && downloadGeneration == generation + 1) {
+            setState(() {
+              cached = store.cachedChapterCount(book, chapters);
+            });
+          }
+          return;
+        }
+        setState(() {
+          cached++;
+        });
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
-      if (mounted) {
+      if (mounted && generation == downloadGeneration) {
         setState(() {
-          message = cached == total ? '已缓存全部章节。' : '缓存已暂停，已下载的章节会保留。';
+          cached = total;
         });
+        _notice('已缓存全部章节。');
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          message = '已下载的章节会保留。$e';
-        });
-      }
+      if (mounted && generation == downloadGeneration) _notice('已下载的章节会保留。$e');
     } finally {
-      if (mounted) {
+      if (mounted && generation == downloadGeneration) {
         setState(() {
           downloading = false;
         });
       }
     }
   }
+
+  void _notice(String text) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   @override
   Widget build(BuildContext context) {
@@ -96,14 +116,16 @@ class _BookDetailsState extends State<BookDetails> {
       appBar: AppBar(
         title: const Text('书籍详情'),
         actions: [
-          IconButton(
-            tooltip: downloading ? '暂停缓存' : '离线缓存',
+          CacheProgressButton(
+            active: downloading,
+            cached: cached,
+            total: total,
+            tooltip: downloading
+                ? '暂停缓存'
+                : total > 0 && cached < total
+                ? '继续缓存'
+                : '离线缓存',
             onPressed: download,
-            icon: Icon(
-              downloading
-                  ? Icons.pause_circle_outline
-                  : Icons.download_outlined,
-            ),
           ),
           const SizedBox(width: 12),
         ],
@@ -176,17 +198,6 @@ class _BookDetailsState extends State<BookDetails> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => read(latest: true),
           ),
-          if (downloading) ...[
-            const SizedBox(height: 20),
-            LinearProgressIndicator(value: total == 0 ? null : cached / total),
-            const SizedBox(height: 8),
-            Text('已缓存 $cached / $total 章'),
-          ],
-          if (message != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 16),
-              child: Text(message!),
-            ),
         ],
       ),
       bottomNavigationBar: SafeArea(

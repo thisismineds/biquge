@@ -7,6 +7,7 @@ import '../entity/BookInfo.dart';
 import '../entity/BookTag.dart';
 import '../entity/Chapter.dart';
 import '../storage/app_store.dart';
+import '../ui/cache_progress_button.dart';
 import 'reading_layout.dart';
 
 class ReaderScreen extends StatefulWidget {
@@ -32,6 +33,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Record? _layoutKey;
   String? _error;
   int _chapter = 0, _page = 0, _pendingOffset = 0, _attempt = 0;
+  int _downloadCached = 0, _downloadTotal = 0;
   bool _attemptEnd = false;
   Map<String, dynamic>? _attemptSaved;
   bool _busy = true, _chrome = true, _end = false, _downloading = false;
@@ -116,6 +118,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         _pages = [];
         _layoutKey = null;
         _chapters[index].hasContent = 2;
+        if (!_downloading) {
+          _downloadCached = 0;
+          _downloadTotal = 0;
+        }
         _busy = false;
       });
     } catch (e) {
@@ -221,37 +227,56 @@ class _ReaderScreenState extends State<ReaderScreen>
       builder: (context) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: .75,
-        builder: (context, scroll) => Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 4, 24, 16),
-              child: Row(
-                children: [
-                  Text('章节目录', style: Theme.of(context).textTheme.titleLarge),
-                  const Spacer(),
-                  Text('${_chapters.length} 章'),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ListView.builder(
-                controller: scroll,
-                itemCount: _chapters.length,
-                itemBuilder: (context, i) => ListTile(
-                  selected: i == _chapter,
-                  title: Text(
-                    _chapters[i].name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: _chapters[i].hasContent == 2
-                      ? const Icon(Icons.offline_pin_outlined, size: 18)
-                      : null,
-                  onTap: () => Navigator.pop(context, i),
+        builder: (context, scroll) => AnimatedBuilder(
+          animation: store,
+          builder: (context, _) => Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 4, 24, 16),
+                child: Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 16,
+                  runSpacing: 8,
+                  children: [
+                    Text('章节目录', style: Theme.of(context).textTheme.titleLarge),
+                    Wrap(
+                      spacing: 10,
+                      children: [
+                        Text('共 ${_chapters.length} 章'),
+                        Text(
+                          '已缓存 ${store.cachedChapterCount(widget.book, _chapters)} 章',
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-            ),
-          ],
+              Expanded(
+                child: ListView.builder(
+                  controller: scroll,
+                  itemCount: _chapters.length,
+                  itemBuilder: (context, i) => ListTile(
+                    selected: i == _chapter,
+                    title: Text(
+                      _chapters[i].name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing:
+                        store.hasCachedChapter(widget.book, _chapters[i].id)
+                        ? const Icon(
+                            Icons.offline_pin_outlined,
+                            size: 18,
+                            semanticLabel: '已缓存',
+                          )
+                        : null,
+                    onTap: () => Navigator.pop(context, i),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -263,16 +288,30 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _download() async {
     if (_downloading) return;
+    final chapters = _chapters.skip(_chapter).toList();
     setState(() {
       _downloading = true;
+      _downloadTotal = chapters.length;
+      _downloadCached = store.cachedChapterCount(widget.book, chapters);
     });
     try {
-      for (var i = _chapter; i < _chapters.length && mounted; i++) {
-        await store.loadContent(widget.book, _chapters[i].id);
-        _chapters[i].hasContent = 2;
+      for (final chapter in chapters) {
+        if (!mounted) break;
+        if (store.hasCachedChapter(widget.book, chapter.id)) continue;
+        await store.loadContent(widget.book, chapter.id);
+        if (!mounted) return;
+        chapter.hasContent = 2;
+        setState(() {
+          _downloadCached++;
+        });
         await Future<void>.delayed(const Duration(milliseconds: 500));
       }
-      if (mounted) _notice('缓存完成，离线时也能继续阅读。');
+      if (mounted) {
+        setState(() {
+          _downloadCached = _downloadTotal;
+        });
+        _notice('缓存完成，离线时也能继续阅读。');
+      }
     } catch (e) {
       if (mounted) _notice('已下载的章节会保留。$e');
     } finally {
@@ -418,21 +457,12 @@ class _ReaderScreenState extends State<ReaderScreen>
                         ),
                         if (_chrome) ...[
                           const SizedBox(width: 14),
-                          IconButton(
-                            constraints: const BoxConstraints(
-                              minWidth: 48,
-                              minHeight: 48,
-                            ),
-                            visualDensity: VisualDensity.standard,
+                          CacheProgressButton(
+                            active: _downloading,
+                            cached: _downloadCached,
+                            total: _downloadTotal,
                             tooltip: '从当前章缓存',
                             onPressed: _downloading ? null : _download,
-                            icon: Icon(
-                              _downloading
-                                  ? Icons.downloading
-                                  : Icons.download_outlined,
-                              size: 20,
-                              color: secondary,
-                            ),
                           ),
                         ],
                       ],

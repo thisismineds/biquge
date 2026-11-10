@@ -492,7 +492,7 @@ class _Settings extends StatelessWidget {
           onTap: () => showAboutDialog(
             context: context,
             applicationName: '清阅',
-            applicationVersion: '2.0.1',
+            applicationVersion: '2.0.2',
             children: const [Text('把注意力留给故事。\n第三方书源的内容与可用性由各站点提供。')],
           ),
         ),

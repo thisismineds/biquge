@@ -93,6 +93,12 @@ components:
   book-cover:
     textColor: "{colors.cover-title}"
     rounded: "{rounded.cover}"
+  cache-progress:
+    diameter: "36dp"
+    strokeWidth: "2.5dp"
+    touchTarget: "48dp"
+    labelSize: "11sp"
+    trackOpacity: 0.16
 ---
 
 # Design System: 清阅
