@@ -57,6 +57,7 @@ class _BookDetailsState extends State<BookDetails> {
       return;
     }
     final generation = ++downloadGeneration;
+    final cacheRevision = store.cacheRevision(book);
     setState(() {
       downloading = true;
       cached = 0;
@@ -73,6 +74,7 @@ class _BookDetailsState extends State<BookDetails> {
       });
       for (final c in chapters) {
         if (!mounted || generation != downloadGeneration) return;
+        if (cacheRevision != store.cacheRevision(book)) return;
         if (store.hasCachedChapter(book, c.id)) continue;
         await store.loadContent(book, c.id);
         if (!mounted) return;

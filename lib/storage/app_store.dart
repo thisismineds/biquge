@@ -26,6 +26,7 @@ class AppStore extends ChangeNotifier {
   };
   final SharedPreferences preferences;
   final BookSources sources;
+  final Map<String, int> _cacheRevisions = {};
   List<Book> shelf = [];
   String? recoveryNotice;
   String sourceId = 'bqg631';
@@ -261,8 +262,127 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<void> remove(Book b) async {
+    final info = infoFor(b);
+    await clearCache(info);
+    for (final localKey in [
+      key(info),
+      chaptersKey(info),
+      'info:${key(info)}',
+    ]) {
+      await _removeLocalKey(localKey);
+    }
     shelf.removeWhere((s) => s.Id == b.Id && s.sourceId == b.sourceId);
     await _saveShelf();
+  }
+
+  int cacheRevision(BookInfo book) => _cacheRevisions[key(book)] ?? 0;
+
+  Set<String> _cachedContentKeys(BookInfo book) {
+    if (book.sourceId != 'legacy') {
+      final prefix = 'content:${book.sourceId}:${book.Id}:';
+      return preferences
+          .getKeys()
+          .where(
+            (k) =>
+                k.startsWith(prefix) &&
+                int.tryParse(k.substring(prefix.length)) != null,
+          )
+          .toSet();
+    }
+    return cachedChapters(book)
+        .where((c) => c.id > 0 && c.hasContent > 0)
+        .map((c) => contentKey(book, c.id))
+        .where(preferences.containsKey)
+        .where((k) {
+          try {
+            final value = jsonDecode(preferences.getString(k)!);
+            if (value is Map<String, dynamic> && value['chapters'] is List) {
+              return false;
+            }
+          } catch (_) {
+            /* Legacy chapter bodies are plain text. */
+          }
+          return true;
+        })
+        .toSet();
+  }
+
+  int cachedBookChapterCount(BookInfo book) =>
+      _cachedContentKeys(book)
+          .where((k) => preferences.getString(k)?.trim().isNotEmpty ?? false)
+          .length;
+
+  List<BookInfo> get cachedBooks {
+    final books = {for (final b in shelf) key(infoFor(b)): infoFor(b)};
+    for (final localKey in preferences.getKeys()) {
+      if (localKey.startsWith('info:')) {
+        try {
+          final b = BookInfo.fromJson(
+            jsonDecode(preferences.getString(localKey)!)
+                as Map<String, dynamic>,
+          );
+          books[key(b)] = b;
+        } catch (_) {
+          /* Other valid cache keys can still identify the book. */
+        }
+      }
+      final content = RegExp(r'^content:([^:]+):(\d+):\d+$')
+          .firstMatch(localKey);
+      if (content != null) {
+        final b = BookInfo.id(int.parse(content[2]!), '书籍 ${content[2]}')
+          ..sourceId = content[1]!;
+        books.putIfAbsent(key(b), () => b);
+      }
+      if (RegExp(r'^\d+$').hasMatch(localKey)) {
+        try {
+          final saved = jsonDecode(preferences.getString(localKey)!);
+          if (saved is Map<String, dynamic> && saved['chapters'] is List) {
+            final b = BookInfo.id(
+              int.parse(localKey),
+              saved['name'] as String? ?? '旧版书籍 $localKey',
+            );
+            books[key(b)] = b;
+          }
+        } catch (_) {
+          /* Numeric legacy chapter keys contain plain text. */
+        }
+      }
+      final toc = RegExp(r'^(\d+)chapters$').firstMatch(localKey);
+      if (toc != null) {
+        final b = BookInfo.id(int.parse(toc[1]!), '旧版书籍 ${toc[1]}');
+        books.putIfAbsent(key(b), () => b);
+      }
+    }
+    return books.values
+        .where(
+          (b) =>
+              cachedBookChapterCount(b) > 0 ||
+              (record(b)?['content'] as String?)?.trim().isNotEmpty == true,
+        )
+        .toList()
+      ..sort((a, b) => a.Name.compareTo(b.Name));
+  }
+
+  Future<void> _removeLocalKey(String localKey) async {
+    if (!await preferences.remove(localKey)) {
+      throw StateError('删除缓存失败，请重试。');
+    }
+  }
+
+  Future<void> clearCache(BookInfo book) async {
+    _cacheRevisions[key(book)] = cacheRevision(book) + 1;
+    for (final localKey in _cachedContentKeys(book)) {
+      await _removeLocalKey(localKey);
+    }
+    // Reading records also contained a copy of the current chapter's text.
+    final saved = record(book);
+    if (saved != null) {
+      saved.remove('content');
+      if (!await preferences.setString(key(book), jsonEncode(saved))) {
+        throw StateError('删除缓存失败，请重试。');
+      }
+    }
+    notifyListeners();
   }
 
   BookInfo infoFor(Book b) {
@@ -312,6 +432,7 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<List<Chapter>> loadChapters(BookInfo b) async {
+    final revision = cacheRevision(b);
     if (b.sourceId == 'legacy') {
       final cached = cachedChapters(b)
           .where((c) => c.hasContent > 0 && c.id > 0)
@@ -321,6 +442,7 @@ class AppStore extends ChangeNotifier {
     }
     try {
       final data = await sources.chapters(b.sourceId, b.Id);
+      if (revision != cacheRevision(b)) throw SourceException('本书缓存已清理，请重新打开。');
       final chapters = data.map(Chapter.fromJson).toList();
       for (final c in chapters) {
         if (preferences.containsKey(contentKey(b, c.id))) c.hasContent = 2;
@@ -335,9 +457,11 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<String> loadContent(BookInfo b, int chapter) async {
+    final revision = cacheRevision(b);
     final cached = preferences.getString(contentKey(b, chapter));
     if (cached != null && cached.trim().isNotEmpty) return cached;
     final text = await sources.content(b.sourceId, b.Id, chapter);
+    if (revision != cacheRevision(b)) throw SourceException('本书缓存已清理，请重新开始缓存。');
     await preferences.setString(contentKey(b, chapter), text);
     notifyListeners();
     return text;
@@ -353,6 +477,12 @@ class AppStore extends ChangeNotifier {
 
   Future<void> saveProgress(BookInfo b, BookTag tag, int textOffset) async {
     final data = tag.toJson()..['readerOffset'] = textOffset;
+    if (tag.chapters.isNotEmpty &&
+        tag.cur >= 0 &&
+        tag.cur < tag.chapters.length &&
+        !hasCachedChapter(b, tag.chapters[tag.cur].id)) {
+      data.remove('content');
+    }
     await preferences.setString(key(b), jsonEncode(data));
     final index = shelf.indexWhere(
       (s) => s.Id == b.Id && s.sourceId == b.sourceId,

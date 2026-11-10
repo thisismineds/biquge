@@ -8,6 +8,7 @@ import '../storage/app_store.dart';
 import 'book_cover.dart';
 import 'search_screen.dart';
 import 'book_details.dart';
+import 'cache_management.dart';
 
 class ReaderShell extends StatefulWidget {
   final AppStore store;
@@ -124,7 +125,7 @@ class _Library extends StatelessWidget {
             ListTile(
               leading: const Icon(Icons.remove_circle_outline),
               title: const Text('移出书架'),
-              subtitle: const Text('已缓存的正文和阅读进度会保留'),
+              subtitle: const Text('同时删除本书缓存和阅读进度'),
               onTap: () => Navigator.pop(context, 'remove'),
             ),
           ],
@@ -133,7 +134,32 @@ class _Library extends StatelessWidget {
     );
     if (!context.mounted) return;
     if (action == 'remove') {
-      await store.remove(b);
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('移出书架？'),
+          content: Text('《${b.Name}》将移出书架，同时删除本书缓存和阅读进度。再次阅读需要重新缓存。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('移出并删除'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      try {
+        await store.remove(b);
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('移出未完成，请重试。$e')));
+        }
+      }
     }
     if (action == 'details') {
       try {
@@ -479,10 +505,17 @@ class _Settings extends StatelessWidget {
           title: Text('离线阅读'),
           subtitle: Text('在书籍详情或阅读页缓存章节，断网后也能继续读。'),
         ),
-        const ListTile(
-          leading: Icon(Icons.bookmark_border),
-          title: Text('本地保存'),
-          subtitle: Text('书架、排版设置和阅读进度保存在这台设备上。'),
+        ListTile(
+          leading: const Icon(Icons.bookmark_border),
+          title: const Text('本地保存'),
+          subtitle: const Text('按书管理缓存，保留书架和阅读进度'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(
+              builder: (_) => CacheManagement(store: store),
+            ),
+          ),
         ),
         const Divider(height: 32),
         ListTile(
@@ -492,7 +525,7 @@ class _Settings extends StatelessWidget {
           onTap: () => showAboutDialog(
             context: context,
             applicationName: '清阅',
-            applicationVersion: '2.0.2',
+            applicationVersion: '2.0.3',
             children: const [Text('把注意力留给故事。\n第三方书源的内容与可用性由各站点提供。')],
           ),
         ),

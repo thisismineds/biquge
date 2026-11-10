@@ -106,7 +106,9 @@ class _ReaderScreenState extends State<ReaderScreen>
             (tag.index > 0 && tag.index <= tag.pageOffsets.length
                 ? tag.pageOffsets[tag.index - 1]
                 : 0);
-        offset = remapTextOffset(tag.content ?? raw, oldOffset, text);
+        final oldText =
+            tag.content ?? (saved.containsKey('readerOffset') ? text : raw);
+        offset = remapTextOffset(oldText, oldOffset, text);
       }
       if (!mounted) return;
       setState(() {
@@ -289,6 +291,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _download() async {
     if (_downloading) return;
     final chapters = _chapters.skip(_chapter).toList();
+    final cacheRevision = store.cacheRevision(widget.book);
     setState(() {
       _downloading = true;
       _downloadTotal = chapters.length;
@@ -297,6 +300,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     try {
       for (final chapter in chapters) {
         if (!mounted) break;
+        if (cacheRevision != store.cacheRevision(widget.book)) return;
         if (store.hasCachedChapter(widget.book, chapter.id)) continue;
         await store.loadContent(widget.book, chapter.id);
         if (!mounted) return;
