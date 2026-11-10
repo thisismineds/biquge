@@ -49,6 +49,23 @@ class ReadingStyle {
   );
 }
 
+// Release/profile builds strip dart:ui diagnostic toString overrides.
+Record readingLayoutSignature(
+  Size viewport,
+  ReadingStyle style,
+  String marginMode,
+  TextScaler scaler,
+) => (
+  viewport.width,
+  viewport.height,
+  marginMode,
+  style.fontSize,
+  style.lineHeight,
+  style.paragraphGap,
+  style.horizontalPadding,
+  scaler.scale(style.fontSize),
+);
+
 String formatChapter(String raw) => raw
     .replaceAll('\r\n', '\n')
     .replaceAll('\r', '\n')

@@ -29,7 +29,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   List<ReadingPage> _pages = [];
   PageController? _controller;
   String _text = '';
-  String? _layoutKey, _error;
+  Record? _layoutKey;
+  String? _error;
   int _chapter = 0, _page = 0, _pendingOffset = 0, _attempt = 0;
   bool _attemptEnd = false;
   Map<String, dynamic>? _attemptSaved;
@@ -128,8 +129,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _layout(Size size, ReadingStyle style, TextScaler scaler) {
-    final signature =
-        '$size:${store.marginPresetId}:${style.fontSize}:${style.lineHeight}:${style.paragraphGap}:${style.horizontalPadding}:${scaler.scale(style.fontSize)}';
+    final signature = readingLayoutSignature(
+      size,
+      style,
+      store.marginPresetId,
+      scaler,
+    );
     if (signature == _layoutKey) return;
     final anchor = _pages.isNotEmpty
         ? _pages[_page.clamp(0, _pages.length - 1)].start
@@ -372,7 +377,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                               }
                             },
                             child: PageView.builder(
-                              key: ValueKey('$_chapter:$_layoutKey'),
+                              key: ValueKey((_chapter, _layoutKey)),
                               controller: _controller,
                               itemCount: _pages.length + 2,
                               onPageChanged: _pageChanged,
