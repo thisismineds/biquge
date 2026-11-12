@@ -4,7 +4,7 @@ import '../entity/BookInfo.dart';
 import '../service/book_sources.dart';
 import '../storage/app_store.dart';
 import 'book_cover.dart';
-import 'book_details.dart';
+import 'recommendation_list_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final AppStore store;
@@ -59,33 +59,48 @@ class _HomeScreenState extends State<HomeScreen> {
     if (opening) return;
     setState(() => opening = true);
     try {
-      final data = await widget.store.sources.detail(book.sourceId, book.Id);
-      if (!mounted || !visible) return;
-      await Navigator.push<void>(
+      await openRecommendedBook(
         context,
-        MaterialPageRoute(
-          builder: (_) =>
-              BookDetails(store: widget.store, book: BookInfo.fromJson(data)),
-        ),
+        widget.store,
+        book,
+        active: () => widget.active,
       );
-    } catch (_) {
-      if (mounted && visible) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('书籍详情暂时打不开，请稍后重试。')));
-      }
     } finally {
       if (mounted) setState(() => opening = false);
     }
   }
 
+  void browse(
+    String title,
+    List<BookInfo> books, {
+    Future<List<BookInfo>> Function()? loadCatalog,
+  }) => Navigator.push<void>(
+    context,
+    MaterialPageRoute(
+      builder: (_) => RecommendationListScreen(
+        store: widget.store,
+        title: title,
+        preview: books,
+        loadCatalog: loadCatalog,
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final data = sections;
+    final selected = category;
+    final heading =
+        BookSources.recommendationCategories[selected]?.label ?? '综合推荐';
+    final recent = data?['uplist'] ?? const <BookInfo>[];
     final featured = data?['hotlist']?.take(4).toList() ?? const <BookInfo>[];
     final featuredIds = featured.map((book) => book.Id).toSet();
     final popular = (data?['toplist'] ?? const <BookInfo>[])
         .where((book) => !featuredIds.contains(book.Id))
         .toList();
+    final preview = selected == null
+        ? [...featured, ...popular]
+        : data?[selected] ?? const <BookInfo>[];
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 76,
@@ -149,24 +164,32 @@ class _HomeScreenState extends State<HomeScreen> {
                           for (final entry
                               in BookSources.recommendationCategories.entries)
                             if (data.containsKey(entry.key))
-                              choice(entry.value, entry.key),
+                              choice(entry.value.label, entry.key),
                         ],
                       ),
                       const SizedBox(height: 22),
-                      Text(
-                        category == null
-                            ? '综合推荐'
-                            : BookSources.recommendationCategories[category]!,
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: 4),
                       Text(
                         '来自笔趣阁 631',
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 8),
+                      if (selected == null && recent.isNotEmpty) ...[
+                        sectionHeading('最近更新', () => browse('最近更新', recent)),
+                        for (final book in recent.take(3)) bookRow(book),
+                        const SizedBox(height: 20),
+                      ],
+                      sectionHeading(
+                        heading,
+                        () => browse(
+                          selected == null ? '综合书单' : heading,
+                          preview,
+                          loadCatalog: () => widget.store.sources
+                              .recommendationCatalog(selected),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       if (category != null)
                         for (final book in data[category]!) bookRow(book)
                       else ...[
@@ -194,6 +217,18 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
     );
   }
+
+  Widget sectionHeading(String title, VoidCallback more) => Row(
+    children: [
+      Expanded(
+        child: Text(title, style: Theme.of(context).textTheme.headlineSmall),
+      ),
+      Tooltip(
+        message: '$title更多',
+        child: TextButton(onPressed: more, child: const Text('更多')),
+      ),
+    ],
+  );
 
   Widget choice(String label, String? value) => ChoiceChip(
     label: Text(label),
@@ -247,39 +282,8 @@ class _HomeScreenState extends State<HomeScreen> {
     },
   );
 
-  Widget bookRow(BookInfo book) => InkWell(
+  Widget bookRow(BookInfo book) => RecommendationBookTile(
+    book: book,
     onTap: opening ? null : () => open(book),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Row(
-        children: [
-          BookCover(title: book.Name, url: book.Img, width: 54, height: 76),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  book.Name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                if (book.Author.isNotEmpty)
-                  Text(
-                    book.Author,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const Icon(Icons.chevron_right_rounded),
-        ],
-      ),
-    ),
   );
 }

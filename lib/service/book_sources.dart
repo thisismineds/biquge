@@ -22,12 +22,12 @@ class BookSource {
 /// Adapts the three sites to the existing reader's JSON models.
 class BookSources {
   static const recommendationCategories = {
-    'sort1': '玄幻奇幻',
-    'sort2': '武侠仙侠',
-    'sort3': '都市言情',
-    'sort4': '历史军事',
-    'sort5': '网游竞技',
-    'sort6': '科幻灵异',
+    'sort1': (label: '玄幻奇幻', catalog: 'xuanhuan'),
+    'sort2': (label: '武侠仙侠', catalog: 'wuxia'),
+    'sort3': (label: '都市言情', catalog: 'dushi'),
+    'sort4': (label: '历史军事', catalog: 'lishi'),
+    'sort5': (label: '网游竞技', catalog: 'wangyou'),
+    'sort6': (label: '科幻灵异', catalog: 'kehuan'),
   };
   static const sources = <BookSource>[
     BookSource('bqg631', '笔趣阁 631', 'https://www.bqg631.xyz/'),
@@ -222,44 +222,109 @@ class BookSources {
   };
 
   Future<Map<String, List<BookInfo>>> recommendations() async {
-    final origin = source('bqg631').url;
     final data = await _bqg('index', {'sort': 'index'});
     final sections = <String, List<BookInfo>>{};
     for (final section in [
+      'uplist',
       'hotlist',
       'toplist',
       ...recommendationCategories.keys,
     ]) {
-      final rows = data[section];
-      if (rows is! List) continue;
-      final books = <BookInfo>[];
-      final seen = <int>{};
-      for (final row in rows.whereType<Map<String, dynamic>>()) {
-        final id = int.tryParse('${row['id']}');
-        final title = row['title'];
-        if (id == null ||
-            id < 1 ||
-            title is! String ||
-            title.trim().isEmpty ||
-            !seen.add(id)) {
-          continue;
-        }
-        books.add(
-          BookInfo.fromJson(
-            _book(
-              'bqg631',
-              id,
-              title.trim(),
-              author: row['author'] is String ? row['author'] as String : '',
-              image: '${origin}bookimg/${id ~/ 1000}/$id.jpg',
-            ),
-          ),
-        );
-      }
+      final books = _recommendationBooks(data[section]);
       if (books.isNotEmpty) sections[section] = books;
     }
     if (sections.isEmpty) throw SourceException('书源暂时没有推荐书籍。');
+    if (sections['uplist'] case final recent?) {
+      // The site's short dates use its China calendar, regardless of device zone.
+      final now = DateTime.now().toUtc().add(const Duration(hours: 8));
+      final today = DateTime.utc(now.year, now.month, now.day);
+      final ranked =
+          recent.indexed
+              .map(
+                (entry) => (
+                  order: entry.$1,
+                  book: entry.$2,
+                  date: _updateRank(entry.$2.LastTime, today),
+                ),
+              )
+              .toList()
+            ..sort(
+              (a, b) => a.date == b.date
+                  ? a.order.compareTo(b.order)
+                  : b.date.compareTo(a.date),
+            );
+      sections['uplist'] = ranked.map((entry) => entry.book).toList();
+    }
     return sections;
+  }
+
+  Future<List<BookInfo>> recommendationCatalog(String? category) async {
+    final sort = category == null
+        ? 'top'
+        : recommendationCategories[category]?.catalog;
+    if (sort == null) throw ArgumentError.value(category, 'category');
+    final data = await _bqg('sort', {'sort': sort});
+    final books = _recommendationBooks(data['data']);
+    if (books.isEmpty) throw SourceException('书源暂时没有更多书籍。');
+    return books;
+  }
+
+  List<BookInfo> _recommendationBooks(Object? rows) {
+    if (rows is! List) return [];
+    final origin = source('bqg631').url;
+    final books = <BookInfo>[];
+    final seen = <int>{};
+    for (final row in rows.whereType<Map<String, dynamic>>()) {
+      final id = int.tryParse('${row['id']}');
+      final title = row['title'];
+      if (id == null ||
+          id < 1 ||
+          title is! String ||
+          title.trim().isEmpty ||
+          !seen.add(id)) {
+        continue;
+      }
+      books.add(
+        BookInfo.fromJson(
+          _book(
+            'bqg631',
+            id,
+            title.trim(),
+            author: row['author'] is String ? row['author'] as String : '',
+            image: '${origin}bookimg/${id ~/ 1000}/$id.jpg',
+            category: row['sortname'] is String
+                ? row['sortname'] as String
+                : '',
+            last: row['lastchapter'] is String
+                ? row['lastchapter'] as String
+                : '',
+            updated: row['uptime'] is String ? row['uptime'] as String : '',
+          ),
+        ),
+      );
+    }
+    return books;
+  }
+
+  int _updateRank(String value, DateTime today) {
+    final date = DateTime.tryParse(value);
+    if (date != null) {
+      return DateTime.utc(
+        date.year,
+        date.month,
+        date.day,
+      ).millisecondsSinceEpoch;
+    }
+    final shortDate = RegExp(r'^(\d{1,2})-(\d{1,2})$').firstMatch(value.trim());
+    if (shortDate == null) return 0;
+    final month = int.parse(shortDate[1]!), day = int.parse(shortDate[2]!);
+    var resolved = DateTime.utc(today.year, month, day);
+    if (resolved.isAfter(today)) {
+      resolved = DateTime.utc(today.year - 1, month, day);
+    }
+    return resolved.month == month && resolved.day == day
+        ? resolved.millisecondsSinceEpoch
+        : 0;
   }
 
   Future<List<Map<String, dynamic>>> search(
