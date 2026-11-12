@@ -38,6 +38,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Map<String, dynamic>? _attemptSaved;
   bool _busy = true, _chrome = true, _end = false, _downloading = false;
   AppStore get store => widget.store;
+  bool get _canSwitchMirror => widget.book.sourceId == 'bqg631';
 
   @override
   void initState() {
@@ -51,8 +52,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (mounted) setState(() {});
   }
 
-  Future<void> _initialize() async {
+  Future<void> _initialize({bool switchMirror = false}) async {
+    if (switchMirror) {
+      setState(() {
+        _busy = true;
+        _error = null;
+      });
+    }
     try {
+      if (switchMirror) await store.advanceBqgHost(widget.book);
       final saved = store.record(widget.book);
       _chapters = await store.loadChapters(widget.book);
       if (!mounted) return;
@@ -84,7 +92,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     int index, {
     bool end = false,
     Map<String, dynamic>? saved,
+    bool switchMirror = false,
   }) async {
+    final keepCurrent = switchMirror && _error == null && _text.isNotEmpty;
     _attempt = index;
     _attemptEnd = end;
     _attemptSaved = saved;
@@ -95,7 +105,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       });
     }
     try {
-      final raw = await store.loadContent(widget.book, _chapters[index].id);
+      if (switchMirror) await store.advanceBqgHost(widget.book);
+      final raw = await store.loadContent(
+        widget.book,
+        _chapters[index].id,
+        refresh: switchMirror,
+      );
       final text = formatChapter(raw);
       if (text.isEmpty) throw StateError('这一章暂时没有可读正文。');
       var offset = 0;
@@ -126,14 +141,48 @@ class _ReaderScreenState extends State<ReaderScreen>
         }
         _busy = false;
       });
+      if (switchMirror) _mirrorNotice('已切换接口：${store.sources.bqgHost}');
     } catch (e) {
       if (mounted) {
         setState(() {
           _busy = false;
-          _error = '$e';
+          if (keepCurrent) {
+            _layoutKey = null;
+          } else {
+            _error = '$e';
+          }
         });
+        if (keepCurrent) {
+          _mirrorNotice('新接口暂时无法加载，已保留当前正文。可再次更换。');
+        }
       }
     }
+  }
+
+  void _switchChapterContent() {
+    if (_busy) return;
+    if (_chapters.isEmpty) {
+      _initialize(switchMirror: true);
+    } else {
+      _open(_error == null ? _chapter : _attempt, switchMirror: true);
+    }
+  }
+
+  void _mirrorNotice(String message) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(
+            16,
+            0,
+            16,
+            84 + MediaQuery.viewPaddingOf(context).bottom,
+          ),
+        ),
+      );
   }
 
   void _layout(Size size, ReadingStyle style, TextScaler scaler) {
@@ -317,7 +366,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         _notice('缓存完成，离线时也能继续阅读。');
       }
     } catch (e) {
-      if (mounted) _notice('已下载的章节会保留。$e');
+      if (mounted && cacheRevision == store.cacheRevision(widget.book)) {
+        _notice('已下载的章节会保留。$e');
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -450,16 +501,25 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                     child: Row(
                       children: [
-                        Text(
-                          '${_chapter + 1} / ${_chapters.length} 章',
-                          style: TextStyle(color: secondary, fontSize: 12),
+                        Expanded(
+                          child: Text(
+                            '${_chapter + 1} / ${_chapters.length} 章',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(color: secondary, fontSize: 12),
+                          ),
                         ),
-                        const Spacer(),
                         Text(
                           '第${_page + 1}/${_pages.length}页',
                           style: TextStyle(color: secondary, fontSize: 12),
                         ),
                         if (_chrome) ...[
+                          if (_canSwitchMirror)
+                            IconButton(
+                              tooltip: '更换章节内容',
+                              onPressed: _switchChapterContent,
+                              icon: const Icon(Icons.swap_horiz_rounded),
+                            ),
                           const SizedBox(width: 14),
                           CacheProgressButton(
                             active: _downloading,
@@ -494,6 +554,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                 : _open(_attempt, end: _attemptEnd, saved: _attemptSaved),
             child: const Text('重新加载'),
           ),
+          if (_canSwitchMirror)
+            TextButton(
+              onPressed: _switchChapterContent,
+              child: const Text('更换章节内容'),
+            ),
           if (_text.isNotEmpty)
             TextButton(
               onPressed: () => setState(() {

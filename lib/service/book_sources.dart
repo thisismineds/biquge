@@ -26,7 +26,9 @@ class BookSources {
   ];
   static final instance = BookSources();
   static String activeId = 'bqg631';
-  static const _bqgHosts = ['apibi.cc', 'apiqu.cc', 'apige.cc'];
+  static const bqgHosts = ['apibi.cc', 'apiqu.cc', 'apige.cc'];
+  String? bqgHost;
+  String? lastBqgChapterHost;
   final Dio client;
 
   BookSources({Dio? client})
@@ -114,9 +116,23 @@ class BookSources {
       };
     }
     late SourceException last;
-    for (final host in _bqgHosts) {
+    final selectedHost = bqgHost;
+    final hosts = selectedHost == null
+        ? bqgHosts
+        : [
+            selectedHost,
+            if (action != 'chapter')
+              ...bqgHosts.where((h) => h != selectedHost),
+          ];
+    for (final host in hosts) {
       try {
-        return await _json('https://$host/api/$action', query);
+        final result = await _json('https://$host/api/$action', query);
+        if (action == 'chapter' &&
+            result['txt'] is String &&
+            (result['txt'] as String).trim().isNotEmpty) {
+          lastBqgChapterHost = host;
+        }
+        return result;
       } on SourceException catch (e) {
         last = e;
       }

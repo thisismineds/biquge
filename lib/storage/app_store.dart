@@ -26,6 +26,7 @@ class AppStore extends ChangeNotifier {
   };
   final SharedPreferences preferences;
   final BookSources sources;
+  static const _bqgHostKey = 'bqg631.apiHost';
   final Map<String, int> _cacheRevisions = {};
   List<Book> shelf = [];
   String? recoveryNotice;
@@ -38,6 +39,10 @@ class AppStore extends ChangeNotifier {
 
   AppStore(this.preferences, {BookSources? sources})
     : sources = sources ?? BookSources.instance {
+    final savedHost = preferences.getString(_bqgHostKey);
+    this.sources.bqgHost = BookSources.bqgHosts.contains(savedHost)
+        ? savedHost
+        : null;
     final savedSource = preferences.getString('activeSourceId');
     if (BookSources.sources.any((s) => s.id == savedSource)) {
       sourceId = savedSource!;
@@ -277,6 +282,18 @@ class AppStore extends ChangeNotifier {
 
   int cacheRevision(BookInfo book) => _cacheRevisions[key(book)] ?? 0;
 
+  Future<void> advanceBqgHost(BookInfo book) async {
+    final hosts = BookSources.bqgHosts;
+    final current =
+        sources.bqgHost ?? sources.lastBqgChapterHost ?? hosts.first;
+    final next = hosts[(hosts.indexOf(current) + 1) % hosts.length];
+    if (!await preferences.setString(_bqgHostKey, next)) {
+      throw SourceException('无法保存所选接口，请重试。');
+    }
+    sources.bqgHost = next;
+    _cacheRevisions[key(book)] = cacheRevision(book) + 1;
+  }
+
   Set<String> _cachedContentKeys(BookInfo book) {
     if (book.sourceId != 'legacy') {
       final prefix = 'content:${book.sourceId}:${book.Id}:';
@@ -456,12 +473,19 @@ class AppStore extends ChangeNotifier {
     }
   }
 
-  Future<String> loadContent(BookInfo b, int chapter) async {
+  Future<String> loadContent(
+    BookInfo b,
+    int chapter, {
+    bool refresh = false,
+  }) async {
     final revision = cacheRevision(b);
     final cached = preferences.getString(contentKey(b, chapter));
-    if (cached != null && cached.trim().isNotEmpty) return cached;
+    if (!refresh && cached != null && cached.trim().isNotEmpty) return cached;
     final text = await sources.content(b.sourceId, b.Id, chapter);
     if (revision != cacheRevision(b)) throw SourceException('本书缓存已清理，请重新开始缓存。');
+    if (refresh && formatChapter(text).isEmpty) {
+      throw SourceException('这个接口没有可读正文。');
+    }
     await preferences.setString(contentKey(b, chapter), text);
     notifyListeners();
     return text;
