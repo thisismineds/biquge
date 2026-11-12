@@ -5,6 +5,8 @@ import 'package:encrypt/encrypt.dart' as cipher;
 import 'package:html/parser.dart' as html;
 import 'package:html/dom.dart' show Element;
 
+import '../entity/BookInfo.dart';
+
 class SourceException implements Exception {
   final String message;
   SourceException(this.message);
@@ -19,6 +21,14 @@ class BookSource {
 
 /// Adapts the three sites to the existing reader's JSON models.
 class BookSources {
+  static const recommendationCategories = {
+    'sort1': '玄幻奇幻',
+    'sort2': '武侠仙侠',
+    'sort3': '都市言情',
+    'sort4': '历史军事',
+    'sort5': '网游竞技',
+    'sort6': '科幻灵异',
+  };
   static const sources = <BookSource>[
     BookSource('bqg631', '笔趣阁 631', 'https://www.bqg631.xyz/'),
     BookSource('kuwo', '酷我小说', 'https://appi.kuwo.cn/'),
@@ -210,6 +220,47 @@ class BookSources {
     'LastChapterId': '${book['LastChapterId']}',
     'UpdateTime': book['LastTime'],
   };
+
+  Future<Map<String, List<BookInfo>>> recommendations() async {
+    final origin = source('bqg631').url;
+    final data = await _bqg('index', {'sort': 'index'});
+    final sections = <String, List<BookInfo>>{};
+    for (final section in [
+      'hotlist',
+      'toplist',
+      ...recommendationCategories.keys,
+    ]) {
+      final rows = data[section];
+      if (rows is! List) continue;
+      final books = <BookInfo>[];
+      final seen = <int>{};
+      for (final row in rows.whereType<Map<String, dynamic>>()) {
+        final id = int.tryParse('${row['id']}');
+        final title = row['title'];
+        if (id == null ||
+            id < 1 ||
+            title is! String ||
+            title.trim().isEmpty ||
+            !seen.add(id)) {
+          continue;
+        }
+        books.add(
+          BookInfo.fromJson(
+            _book(
+              'bqg631',
+              id,
+              title.trim(),
+              author: row['author'] is String ? row['author'] as String : '',
+              image: '${origin}bookimg/${id ~/ 1000}/$id.jpg',
+            ),
+          ),
+        );
+      }
+      if (books.isNotEmpty) sections[section] = books;
+    }
+    if (sections.isEmpty) throw SourceException('书源暂时没有推荐书籍。');
+    return sections;
+  }
 
   Future<List<Map<String, dynamic>>> search(
     String sourceId,

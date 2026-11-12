@@ -9,6 +9,7 @@ import 'book_cover.dart';
 import 'search_screen.dart';
 import 'book_details.dart';
 import 'cache_management.dart';
+import 'home_screen.dart';
 
 class ReaderShell extends StatefulWidget {
   final AppStore store;
@@ -19,7 +20,13 @@ class ReaderShell extends StatefulWidget {
 
 class _ReaderShellState extends State<ReaderShell> {
   int selected = 0;
+  final _pagesKey = GlobalKey();
   static const destinations = [
+    NavigationDestination(
+      icon: Icon(Icons.home_outlined),
+      selectedIcon: Icon(Icons.home_rounded),
+      label: '首页',
+    ),
     NavigationDestination(
       icon: Icon(Icons.auto_stories_outlined),
       selectedIcon: Icon(Icons.auto_stories),
@@ -37,10 +44,20 @@ class _ReaderShellState extends State<ReaderShell> {
     animation: widget.store,
     builder: (context, _) {
       final screens = [
+        HomeScreen(
+          store: widget.store,
+          onSearch: () => openSearch(context, widget.store),
+          active: selected == 0,
+        ),
         _Library(store: widget.store),
         _Sources(store: widget.store),
         _Settings(store: widget.store),
       ];
+      final content = IndexedStack(
+        key: _pagesKey,
+        index: selected,
+        children: screens,
+      );
       return LayoutBuilder(
         builder: (context, constraints) {
           if (constraints.maxWidth >= 650) {
@@ -53,29 +70,23 @@ class _ReaderShellState extends State<ReaderShell> {
                       selected = i;
                     }),
                     labelType: NavigationRailLabelType.all,
-                    destinations: const [
-                      NavigationRailDestination(
-                        icon: Icon(Icons.auto_stories_outlined),
-                        label: Text('书架'),
-                      ),
-                      NavigationRailDestination(
-                        icon: Icon(Icons.explore_outlined),
-                        label: Text('书源'),
-                      ),
-                      NavigationRailDestination(
-                        icon: Icon(Icons.tune_rounded),
-                        label: Text('设置'),
-                      ),
+                    destinations: [
+                      for (final destination in destinations)
+                        NavigationRailDestination(
+                          icon: destination.icon,
+                          selectedIcon: destination.selectedIcon,
+                          label: Text(destination.label),
+                        ),
                     ],
                   ),
                   const VerticalDivider(width: 1),
-                  Expanded(child: screens[selected]),
+                  Expanded(child: content),
                 ],
               ),
             );
           }
           return Scaffold(
-            body: screens[selected],
+            body: content,
             bottomNavigationBar: NavigationBar(
               selectedIndex: selected,
               destinations: destinations,
@@ -525,7 +536,7 @@ class _Settings extends StatelessWidget {
           onTap: () => showAboutDialog(
             context: context,
             applicationName: '清阅',
-            applicationVersion: '2.0.5',
+            applicationVersion: '2.0.6',
             children: const [Text('把注意力留给故事。\n第三方书源的内容与可用性由各站点提供。')],
           ),
         ),

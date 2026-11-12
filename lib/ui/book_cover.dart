@@ -14,6 +14,7 @@ class BookCover extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
+    final compact = width != null && width! < 72;
     final fallback = ColoredBox(
       color: Color.lerp(
         const Color(0xFF334F43),
@@ -21,7 +22,7 @@ class BookCover extends StatelessWidget {
         (title.runes.fold(0, (a, b) => a + b) % 5) / 4,
       )!,
       child: Padding(
-        padding: const EdgeInsets.all(13),
+        padding: EdgeInsets.all(compact ? 8 : 13),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -38,12 +39,14 @@ class BookCover extends StatelessWidget {
                 ),
               ),
             ),
-            Container(width: 24, height: 1, color: const Color(0xFFDDD3BB)),
-            const SizedBox(height: 10),
-            const Text(
-              '清阅',
-              style: TextStyle(color: Color(0xFFE6E0D0), fontSize: 10),
-            ),
+            if (!compact) ...[
+              Container(width: 24, height: 1, color: const Color(0xFFDDD3BB)),
+              const SizedBox(height: 10),
+              const Text(
+                '清阅',
+                style: TextStyle(color: Color(0xFFE6E0D0), fontSize: 10),
+              ),
+            ],
           ],
         ),
       ),

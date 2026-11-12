@@ -109,6 +109,8 @@ void main() {
   ) async {
     final store = await seeded();
     await tester.pumpWidget(ReaderApp(store: store));
+    await tester.tap(find.text('书架').last);
+    await tester.pumpAndSettle();
     await tester.longPress(find.text('bqg631 示例书').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('移出书架'));

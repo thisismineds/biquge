@@ -35,6 +35,8 @@ void main() {
     (tester) async {
       final store = await storeWith((_) async => jsonBody({'data': []}));
       await tester.pumpWidget(ReaderApp(store: store));
+      await tester.tap(find.text('书架').last);
+      await tester.pumpAndSettle();
       expect(find.text('下一本好书，等你翻开'), findsOneWidget);
       await tester.tap(find.text('书源').last);
       await tester.pumpAndSettle();
