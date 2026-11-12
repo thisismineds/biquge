@@ -34,6 +34,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   String? _error;
   int _chapter = 0, _page = 0, _pendingOffset = 0, _attempt = 0;
   int _downloadCached = 0, _downloadTotal = 0;
+  int _prefetchRun = 0;
   bool _attemptEnd = false;
   Map<String, dynamic>? _attemptSaved;
   bool _busy = true, _chrome = true, _end = false, _downloading = false;
@@ -94,6 +95,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     Map<String, dynamic>? saved,
     bool switchMirror = false,
   }) async {
+    final prefetchRun = ++_prefetchRun;
     final keepCurrent = switchMirror && _error == null && _text.isNotEmpty;
     _attempt = index;
     _attemptEnd = end;
@@ -105,10 +107,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       });
     }
     try {
-      if (switchMirror) await store.advanceBqgHost(widget.book);
+      final chapterId = _chapters[index].id;
+      if (switchMirror) {
+        await store.advanceBqgHost(widget.book, chapterId: chapterId);
+      }
       final raw = await store.loadContent(
         widget.book,
-        _chapters[index].id,
+        chapterId,
         refresh: switchMirror,
       );
       final text = formatChapter(raw);
@@ -142,6 +147,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _busy = false;
       });
       if (switchMirror) _mirrorNotice('已切换接口：${store.sources.bqgHost}');
+      unawaited(_prefetch(index, prefetchRun));
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -155,6 +161,24 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (keepCurrent) {
           _mirrorNotice('新接口暂时无法加载，已保留当前正文。可再次更换。');
         }
+      }
+    }
+  }
+
+  Future<void> _prefetch(int index, int run) async {
+    final book = widget.book;
+    if (book.sourceId == 'legacy') return;
+    final revision = store.cacheRevision(book);
+    for (final chapter in _chapters.skip(index + 1).take(3)) {
+      if (!mounted ||
+          run != _prefetchRun ||
+          revision != store.cacheRevision(book)) {
+        return;
+      }
+      try {
+        await store.loadContent(book, chapter.id);
+      } catch (_) {
+        // A failed background request will be retried if the reader opens it.
       }
     }
   }

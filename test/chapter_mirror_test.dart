@@ -11,37 +11,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'book_sources_test.dart' show FixtureAdapter, jsonBody;
 
 void main() {
-  test(
-    'the first switch advances past the actual automatic fallback',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      final requested = <String>[];
-      final store = AppStore(
-        await SharedPreferences.getInstance(),
-        sources: BookSources(
-          client: Dio()
-            ..httpClientAdapter = FixtureAdapter((o) async {
-              requested.add(o.uri.host);
-              if (o.uri.host == 'apibi.cc') {
-                return ResponseBody.fromString('', 503);
-              }
-              return jsonBody({'txt': '备用接口正文。'});
-            }),
-        ),
-      );
-      final book = BookInfo.id(42, '测试书')..sourceId = 'bqg631';
-      await store.loadContent(book, 1);
-      await store.advanceBqgHost(book);
-      await store.loadContent(book, 1, refresh: true);
-      expect(requested, ['apibi.cc', 'apiqu.cc', 'apige.cc']);
-    },
-  );
+  test('the first switch uses this chapter’s fallback even after another chapter loads', () async {
+    SharedPreferences.setMockInitialValues({});
+    final requested = <String>[];
+    var failPrimary = true;
+    final store = AppStore(
+      await SharedPreferences.getInstance(),
+      sources: BookSources(
+        client: Dio()
+          ..httpClientAdapter = FixtureAdapter((o) async {
+            requested.add(o.uri.host);
+            if (o.uri.host == 'apibi.cc' && failPrimary) {
+              failPrimary = false;
+              return ResponseBody.fromString('', 503);
+            }
+            return jsonBody({'txt': '备用接口正文。'});
+          }),
+      ),
+    );
+    final book = BookInfo.id(42, '测试书')..sourceId = 'bqg631';
+    await store.loadContent(book, 1);
+    await store.loadContent(book, 2);
+    await store.advanceBqgHost(book, chapterId: 1);
+    await store.loadContent(book, 1, refresh: true);
+    expect(requested, ['apibi.cc', 'apiqu.cc', 'apibi.cc', 'apige.cc']);
+  });
 
   testWidgets(
     'switch replaces only the current cache and remembers each mirror',
     (tester) async {
       SharedPreferences.setMockInitialValues({
         'content:bqg631:42:1': '原来缓存的错文。',
+        'content:bqg631:42:2': '原有的第二章缓存。',
       });
       final requested = <String>[];
       var failThird = true;
@@ -88,7 +89,8 @@ void main() {
       );
 
       final reopened = AppStore(prefs, sources: sources());
-      final second = reopened.loadContent(book, 2);
+      final otherBook = BookInfo.id(43, '另一本测试书')..sourceId = 'bqg631';
+      final second = reopened.loadContent(otherBook, 2);
       await tester.pump(const Duration(milliseconds: 20));
       expect(await second, '来自 apiqu.cc 的正文。');
 
@@ -104,7 +106,7 @@ void main() {
       await tapSwitch();
       expect(requested, ['apiqu.cc', 'apiqu.cc', 'apige.cc', 'apibi.cc']);
       expect(prefs.getString('content:bqg631:42:1'), '来自 apibi.cc 的正文。');
-      expect(prefs.getString('content:bqg631:42:2'), '来自 apiqu.cc 的正文。');
+      expect(prefs.getString('content:bqg631:42:2'), '原有的第二章缓存。');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },

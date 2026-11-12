@@ -28,7 +28,7 @@ class BookSources {
   static String activeId = 'bqg631';
   static const bqgHosts = ['apibi.cc', 'apiqu.cc', 'apige.cc'];
   String? bqgHost;
-  String? lastBqgChapterHost;
+  final Map<(int, int), String> _bqgFallbackByChapter = {};
   final Dio client;
 
   BookSources({Dio? client})
@@ -98,7 +98,10 @@ class BookSources {
     String action,
     Map<String, dynamic> query,
   ) async {
-    if (action == 'chapter') {
+    final chapter = action == 'chapter'
+        ? (query['id'] as int, query['chapterid'] as int)
+        : null;
+    if (chapter != null) {
       // Matches the public request builder in bqg631.xyz/js/read.js (2026-11-10).
       final aes = cipher.Encrypter(
         cipher.AES(
@@ -127,10 +130,15 @@ class BookSources {
     for (final host in hosts) {
       try {
         final result = await _json('https://$host/api/$action', query);
-        if (action == 'chapter' &&
+        if (chapter != null &&
+            selectedHost == null &&
             result['txt'] is String &&
             (result['txt'] as String).trim().isNotEmpty) {
-          lastBqgChapterHost = host;
+          if (host == bqgHosts.first) {
+            _bqgFallbackByChapter.remove(chapter);
+          } else {
+            _bqgFallbackByChapter[chapter] = host;
+          }
         }
         return result;
       } on SourceException catch (e) {
@@ -139,6 +147,9 @@ class BookSources {
     }
     throw last;
   }
+
+  String? bqgFallbackFor(int bookId, int? chapterId) =>
+      chapterId == null ? null : _bqgFallbackByChapter[(bookId, chapterId)];
 
   Future<Map<String, dynamic>> _kuwo(
     String path, [

@@ -28,6 +28,7 @@ class AppStore extends ChangeNotifier {
   final BookSources sources;
   static const _bqgHostKey = 'bqg631.apiHost';
   final Map<String, int> _cacheRevisions = {};
+  final Map<(String, int), Future<String>> _pendingContent = {};
   List<Book> shelf = [];
   String? recoveryNotice;
   String sourceId = 'bqg631';
@@ -282,10 +283,12 @@ class AppStore extends ChangeNotifier {
 
   int cacheRevision(BookInfo book) => _cacheRevisions[key(book)] ?? 0;
 
-  Future<void> advanceBqgHost(BookInfo book) async {
+  Future<void> advanceBqgHost(BookInfo book, {int? chapterId}) async {
     final hosts = BookSources.bqgHosts;
     final current =
-        sources.bqgHost ?? sources.lastBqgChapterHost ?? hosts.first;
+        sources.bqgHost ??
+        sources.bqgFallbackFor(book.Id, chapterId) ??
+        hosts.first;
     final next = hosts[(hosts.indexOf(current) + 1) % hosts.length];
     if (!await preferences.setString(_bqgHostKey, next)) {
       throw SourceException('无法保存所选接口，请重试。');
@@ -479,16 +482,32 @@ class AppStore extends ChangeNotifier {
     bool refresh = false,
   }) async {
     final revision = cacheRevision(b);
-    final cached = preferences.getString(contentKey(b, chapter));
+    final localKey = contentKey(b, chapter);
+    final cached = preferences.getString(localKey);
     if (!refresh && cached != null && cached.trim().isNotEmpty) return cached;
-    final text = await sources.content(b.sourceId, b.Id, chapter);
-    if (revision != cacheRevision(b)) throw SourceException('本书缓存已清理，请重新开始缓存。');
-    if (refresh && formatChapter(text).isEmpty) {
-      throw SourceException('这个接口没有可读正文。');
+
+    Future<String> fetch() async {
+      final text = await sources.content(b.sourceId, b.Id, chapter);
+      if (revision != cacheRevision(b)) {
+        throw SourceException('本书缓存已变更，请重试。');
+      }
+      if (formatChapter(text).isEmpty) {
+        throw SourceException('这个接口没有可读正文。');
+      }
+      await preferences.setString(localKey, text);
+      notifyListeners();
+      return text;
     }
-    await preferences.setString(contentKey(b, chapter), text);
-    notifyListeners();
-    return text;
+
+    final requestKey = (localKey, revision);
+    final pending = _pendingContent[requestKey];
+    if (pending != null) return pending;
+    final request = _pendingContent[requestKey] = fetch();
+    try {
+      return await request;
+    } finally {
+      _pendingContent.remove(requestKey);
+    }
   }
 
   bool hasCachedChapter(BookInfo book, int chapter) =>
