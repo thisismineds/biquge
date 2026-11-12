@@ -11,6 +11,67 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'book_sources_test.dart' show FixtureAdapter, jsonBody;
 
 void main() {
+  testWidgets('home switches to the new source and browses its next catalog page', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    SharedPreferences.setMockInitialValues({'activeSourceId': 'kuwo'});
+    final pages = <int>[];
+    final client = Dio()
+      ..httpClientAdapter = FixtureAdapter((o) async {
+        if (o.uri.host != 'www.biquges123.com') {
+          return jsonBody({
+            'hotlist': [
+              {'id': 1, 'title': '原书源推荐'},
+            ],
+          });
+        }
+        if (o.path == '/xh' || o.uri.path == '/xh') {
+          final page = int.tryParse(o.uri.queryParameters['page'] ?? '') ?? 1;
+          pages.add(page);
+          return ResponseBody.fromString(
+            '<main><div class="class"><ul class="hot_4"><li>'
+            '<a href="/${page + 10}"><div class="hot_name">第$page 页书籍</div></a>'
+            '</li></ul></div>'
+            '${page == 1 ? '<div class="page"><a href="/xh?page=2">下一页</a></div>' : ''}</main>',
+            200,
+          );
+        }
+        return ResponseBody.fromString('''
+        <main>
+          <div class="hot"><ul class="hot_4"><li><a href="/11"><div class="hot_name">新来源精选</div></a></li></ul></div>
+          <div class="fenlei_item"><h2><a href="/xh">玄幻奇幻</a></h2><ul><li><a href="/11">新来源玄幻</a></li></ul></div>
+          <div class="update"><ul><li><a href="/12">新来源更新</a><a class="chapter" href="/12/2">第二章</a><time>2026-11-12</time></li></ul></div>
+        </main>
+      ''', 200);
+      });
+    final prefs = await SharedPreferences.getInstance();
+    final store = AppStore(prefs, sources: BookSources(client: client));
+    await tester.pumpWidget(ReaderApp(store: store));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('切换首页书源'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(CheckedPopupMenuItem<String>, '新笔趣阁'));
+    await tester.pumpAndSettle();
+    expect(find.text('新来源更新'), findsWidgets);
+    expect(find.text('原书源推荐'), findsNothing);
+    expect(prefs.getString('home.sourceId'), 'biquges123');
+    expect(store.sourceId, 'kuwo');
+    await tester.tap(find.widgetWithText(ChoiceChip, '玄幻奇幻'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('玄幻奇幻更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('第1 页书籍'), findsWidgets);
+    await tester.tap(find.text('加载更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('第2 页书籍'), findsWidgets);
+    expect(find.text('第1 页书籍'), findsWidgets);
+    expect(pages, [1, 2]);
+  });
+
   testWidgets('retry advances to unqueried books after a group of failures', (
     tester,
   ) async {
@@ -38,7 +99,7 @@ void main() {
           store: store,
           title: '玄幻奇幻',
           preview: books,
-          loadCatalog: () async => books,
+          loadCatalog: (_) async => (books: books, hasMore: false),
           allowUpdateSort: true,
         ),
       ),

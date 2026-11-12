@@ -7,6 +7,8 @@ import 'package:html/dom.dart' show Element;
 
 import '../entity/BookInfo.dart';
 
+typedef RecommendationPage = ({List<BookInfo> books, bool hasMore});
+
 class SourceException implements Exception {
   final String message;
   SourceException(this.message);
@@ -21,14 +23,21 @@ class BookSource {
 
 /// Adapts the three sites to the existing reader's JSON models.
 class BookSources {
+  static const recommendationSources = ['bqg631', 'biquges123'];
   static const recommendationCategories = {
-    'sort1': (label: '玄幻奇幻', catalog: 'xuanhuan'),
-    'sort2': (label: '武侠仙侠', catalog: 'wuxia'),
-    'sort3': (label: '都市言情', catalog: 'dushi'),
-    'sort4': (label: '历史军事', catalog: 'lishi'),
-    'sort5': (label: '网游竞技', catalog: 'wangyou'),
-    'sort6': (label: '科幻灵异', catalog: 'kehuan'),
+    'sort1': (label: '玄幻奇幻', catalog: 'xuanhuan', web: 'xh', webLabel: '玄幻奇幻'),
+    'sort2': (label: '武侠仙侠', catalog: 'wuxia', web: 'xz', webLabel: '武侠修真'),
+    'sort3': (label: '都市言情', catalog: 'dushi', web: 'ds', webLabel: '都市言情'),
+    'sort4': (label: '历史军事', catalog: 'lishi', web: 'cy', webLabel: '穿越历史'),
+    'sort5': (label: '网游竞技', catalog: 'wangyou', web: 'wy', webLabel: '网游竞技'),
+    'sort6': (label: '科幻灵异', catalog: 'kehuan', web: 'kh', webLabel: '科幻灵异'),
   };
+
+  static String recommendationCategoryLabel(String category, String sourceId) {
+    final item = recommendationCategories[category]!;
+    return sourceId == 'biquges123' ? item.webLabel : item.label;
+  }
+
   static const sources = <BookSource>[
     BookSource('bqg631', '笔趣阁 631', 'https://www.bqg631.xyz/'),
     BookSource('kuwo', '酷我小说', 'https://appi.kuwo.cn/'),
@@ -223,7 +232,11 @@ class BookSources {
     'UpdateTime': book['LastTime'],
   };
 
-  Future<Map<String, List<BookInfo>>> recommendations() async {
+  Future<Map<String, List<BookInfo>>> recommendations({
+    String sourceId = 'bqg631',
+  }) async {
+    if (sourceId == 'biquges123') return _webRecommendations();
+    if (sourceId != 'bqg631') throw ArgumentError.value(sourceId, 'sourceId');
     final data = await _bqg('index', {'sort': 'index'});
     final sections = <String, List<BookInfo>>{};
     for (final section in [
@@ -240,6 +253,87 @@ class BookSources {
       sections['uplist'] = recentFirst(recent);
     }
     return sections;
+  }
+
+  Future<Map<String, List<BookInfo>>> _webRecommendations() async {
+    final origin = Uri.parse(source('biquges123').url);
+    final doc = html.parse(await _get(origin.toString()));
+    final candidates = <String, List<BookInfo>>{
+      'hotlist': _webRecommendationBooks(
+        doc.querySelectorAll('.hot > .hot_4 > li'),
+        origin,
+      ),
+      'toplist': _webRecommendationBooks(
+        doc.querySelectorAll('.hot > .hot_9 li'),
+        origin,
+      ),
+      'uplist': recentFirst(
+        _webRecommendationBooks(doc.querySelectorAll('.update li'), origin),
+      ),
+    };
+    for (final section in doc.querySelectorAll('.fenlei_item')) {
+      final href = _attribute(section.querySelector('h2 a'), 'href');
+      final path = Uri.tryParse(href)?.path;
+      for (final entry in recommendationCategories.entries) {
+        if (path == '/${entry.value.web}') {
+          candidates[entry.key] = _webRecommendationBooks(
+            section.querySelectorAll('ul > li'),
+            origin,
+          );
+          break;
+        }
+      }
+    }
+    candidates.removeWhere((_, books) => books.isEmpty);
+    if (candidates.isEmpty) throw SourceException('新笔趣阁暂时没有可用书单。');
+    return candidates;
+  }
+
+  List<BookInfo> _webRecommendationBooks(Iterable<Element> rows, Uri origin) {
+    final seen = <int>{};
+    final books = <BookInfo>[];
+    for (final row in rows) {
+      final anchor = row.querySelector('a[href]');
+      final href = Uri.tryParse(_attribute(anchor, 'href'));
+      if (href == null) continue;
+      final link = origin.resolveUri(href);
+      final id = int.tryParse(
+        RegExp(r'^/(\d+)/?$').firstMatch(link.path)?.group(1) ?? '',
+      );
+      final title =
+          (row.querySelector('.hot_name')?.text ??
+                  anchor?.attributes['title'] ??
+                  anchor?.text ??
+                  '')
+              .trim();
+      if (link.host != origin.host ||
+          id == null ||
+          id < 1 ||
+          title.isEmpty ||
+          !seen.add(id)) {
+        continue;
+      }
+      final image = Uri.tryParse(_attribute(row.querySelector('img'), 'src'));
+      final cover = image == null || image.toString().isEmpty
+          ? null
+          : origin.resolveUri(image);
+      books.add(
+        BookInfo.fromJson(
+          _book(
+            'biquges123',
+            id,
+            title,
+            author: row.querySelector('.author')?.text.trim(),
+            image: cover?.scheme == 'https' || cover?.scheme == 'http'
+                ? cover.toString()
+                : '',
+            last: row.querySelector('.chapter')?.text.trim(),
+            updated: row.querySelector('time')?.text.trim(),
+          ),
+        ),
+      );
+    }
+    return books;
   }
 
   Future<BookInfo> recommendationDetail(BookInfo book) async {
@@ -287,7 +381,40 @@ class BookSources {
     return ranked.map((entry) => entry.book).toList();
   }
 
-  Future<List<BookInfo>> recommendationCatalog(String? category) async {
+  Future<RecommendationPage> recommendationCatalog(
+    String? category, {
+    String sourceId = 'bqg631',
+    int page = 1,
+  }) async {
+    if (sourceId == 'biquges123') {
+      final origin = Uri.parse(source(sourceId).url);
+      final path = category == null
+          ? 'ph'
+          : recommendationCategories[category]?.web;
+      if (path == null) throw ArgumentError.value(category, 'category');
+      final doc = html.parse(
+        await _get(
+          origin.resolve(path).toString(),
+          page == 1 ? null : {'page': page},
+        ),
+      );
+      final books = _webRecommendationBooks(
+        doc.querySelectorAll('.class > .hot_4 > li'),
+        origin,
+      );
+      if (books.isEmpty) throw SourceException('新笔趣阁暂时没有更多书籍。');
+      final hasMore = doc
+          .querySelectorAll('.page a[href]')
+          .any(
+            (link) =>
+                link.text.trim() == '下一页' &&
+                Uri.tryParse(_attribute(link, 'href'))
+                        ?.queryParameters['page'] ==
+                    '${page + 1}',
+          );
+      return (books: books, hasMore: hasMore);
+    }
+    if (sourceId != 'bqg631') throw ArgumentError.value(sourceId, 'sourceId');
     final sort = category == null
         ? 'top'
         : recommendationCategories[category]?.catalog;
@@ -295,7 +422,7 @@ class BookSources {
     final data = await _bqg('sort', {'sort': sort});
     final books = _recommendationBooks(data['data']);
     if (books.isEmpty) throw SourceException('书源暂时没有更多书籍。');
-    return books;
+    return (books: books, hasMore: false);
   }
 
   List<BookInfo> _recommendationBooks(Object? rows) {
@@ -342,6 +469,9 @@ class BookSources {
         date.year,
         date.month,
         date.day,
+        date.hour,
+        date.minute,
+        date.second,
       ).millisecondsSinceEpoch;
     }
     final shortDate = RegExp(r'^(\d{1,2})-(\d{1,2})$').firstMatch(value.trim());

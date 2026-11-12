@@ -23,57 +23,90 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  Map<String, List<BookInfo>>? sections;
+  static const sourcePreference = 'home.sourceId';
+  final feeds = <String, Map<String, List<BookInfo>>>{};
+  late String sourceId;
+  Map<String, List<BookInfo>>? get sections => feeds[sourceId];
   String? category;
+  int loadRun = 0, sourceRevision = 0;
   bool loading = false, opening = false;
   bool get visible => widget.active && ModalRoute.isCurrentOf(context) == true;
 
   @override
   void initState() {
     super.initState();
+    final saved = widget.store.preferences.getString(sourcePreference);
+    sourceId = BookSources.recommendationSources.contains(saved)
+        ? saved!
+        : BookSources.recommendationSources.first;
     load();
   }
 
   Future<void> load() async {
     if (loading) return;
+    final requestedSource = sourceId;
+    final run = ++loadRun;
     setState(() => loading = true);
     try {
-      final next = await widget.store.sources.recommendations();
-      if (!mounted) return;
+      final next = await widget.store.sources.recommendations(
+        sourceId: requestedSource,
+      );
+      if (!mounted || run != loadRun) return;
       setState(() {
-        sections = next;
+        feeds[requestedSource] = next;
         if (!next.containsKey(category)) category = null;
       });
     } catch (_) {
-      if (mounted && visible && sections != null) {
+      if (mounted && run == loadRun && visible && sections != null) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('推荐暂时无法更新，已保留上次加载的书单。')));
       }
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted && run == loadRun) setState(() => loading = false);
     }
+  }
+
+  Future<void> chooseSource(String next) async {
+    if (next == sourceId) return;
+    setState(() {
+      sourceRevision++;
+      sourceId = next;
+      category = null;
+      loading = false;
+      opening = false;
+    });
+    final refresh = load();
+    try {
+      await widget.store.preferences.setString(sourcePreference, next);
+    } catch (_) {
+      // The current selection remains usable if saving the preference fails.
+    }
+    await refresh;
   }
 
   Future<void> open(BookInfo book) async {
     if (opening) return;
+    final revision = sourceRevision;
     setState(() => opening = true);
     try {
       await openRecommendedBook(
         context,
         widget.store,
         book,
-        active: () => widget.active,
+        active: () => widget.active && revision == sourceRevision,
       );
     } finally {
-      if (mounted) setState(() => opening = false);
+      if (mounted && revision == sourceRevision) {
+        setState(() => opening = false);
+      }
     }
   }
 
   void browse(
     String title,
     List<BookInfo> books, {
-    Future<List<BookInfo>> Function()? loadCatalog,
+    Future<RecommendationPage> Function(int page)? loadCatalog,
     bool allowUpdateSort = false,
   }) => Navigator.push<void>(
     context,
@@ -92,8 +125,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final data = sections;
     final selected = category;
-    final heading =
-        BookSources.recommendationCategories[selected]?.label ?? '综合推荐';
+    final currentSource = sourceId;
+    final heading = selected == null
+        ? '综合推荐'
+        : BookSources.recommendationCategoryLabel(selected, currentSource);
     final recent = data?['uplist'] ?? const <BookInfo>[];
     final featured = data?['hotlist']?.take(4).toList() ?? const <BookInfo>[];
     final featuredIds = featured.map((book) => book.Id).toSet();
@@ -111,6 +146,36 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Text('首页', style: Theme.of(context).textTheme.headlineLarge),
         ),
         actions: [
+          PopupMenuButton<String>(
+            tooltip: '切换首页书源',
+            initialValue: currentSource,
+            onSelected: chooseSource,
+            itemBuilder: (_) => [
+              for (final id in BookSources.recommendationSources)
+                CheckedPopupMenuItem(
+                  value: id,
+                  checked: id == currentSource,
+                  child: Text(widget.store.sourceName(id)),
+                ),
+            ],
+            child: SizedBox(
+              height: 48,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 118),
+                    child: Text(
+                      widget.store.sourceName(currentSource),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const Icon(Icons.arrow_drop_down_rounded),
+                ],
+              ),
+            ),
+          ),
           IconButton(
             tooltip: '搜索小说',
             onPressed: widget.onSearch,
@@ -150,6 +215,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 800),
                   child: ListView(
+                    key: PageStorageKey((currentSource, selected)),
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.fromLTRB(24, 6, 24, 28),
                     children: [
@@ -166,17 +232,16 @@ class _HomeScreenState extends State<HomeScreen> {
                           for (final entry
                               in BookSources.recommendationCategories.entries)
                             if (data.containsKey(entry.key))
-                              choice(entry.value.label, entry.key),
+                              choice(
+                                BookSources.recommendationCategoryLabel(
+                                  entry.key,
+                                  currentSource,
+                                ),
+                                entry.key,
+                              ),
                         ],
                       ),
                       const SizedBox(height: 22),
-                      Text(
-                        '来自笔趣阁 631',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
                       if (selected == null && recent.isNotEmpty) ...[
                         sectionHeading('最近更新', () => browse('最近更新', recent)),
                         for (final book in recent.take(3)) bookRow(book),
@@ -187,8 +252,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         () => browse(
                           selected == null ? '综合书单' : heading,
                           preview,
-                          loadCatalog: () => widget.store.sources
-                              .recommendationCatalog(selected),
+                          loadCatalog: (page) =>
+                              widget.store.sources.recommendationCatalog(
+                                selected,
+                                sourceId: currentSource,
+                                page: page,
+                              ),
                           allowUpdateSort: selected != null,
                         ),
                       ),
@@ -201,7 +270,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           if (featured.isNotEmpty) ...[
                             const SizedBox(height: 24),
                             Text(
-                              '强力推荐',
+                              currentSource == 'biquges123' ? '经典推荐' : '强力推荐',
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                             const SizedBox(height: 8),

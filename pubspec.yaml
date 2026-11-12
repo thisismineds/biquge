@@ -1,7 +1,7 @@
 name: qingyue
 description: A quiet Chinese novel reader with selectable sources.
 publish_to: none
-version: 2.0.8+10
+version: 2.0.9+11
 
 environment:
   sdk: '>=3.13.0 <4.0.0'

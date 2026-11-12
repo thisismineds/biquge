@@ -35,7 +35,7 @@ class RecommendationListScreen extends StatefulWidget {
   final AppStore store;
   final String title;
   final List<BookInfo> preview;
-  final Future<List<BookInfo>> Function()? loadCatalog;
+  final Future<RecommendationPage> Function(int page)? loadCatalog;
   final bool allowUpdateSort;
 
   const RecommendationListScreen({
@@ -53,12 +53,42 @@ class RecommendationListScreen extends StatefulWidget {
 }
 
 class _RecommendationListScreenState extends State<RecommendationListScreen> {
-  late Future<List<BookInfo>>? catalog = widget.loadCatalog?.call();
+  late Future<RecommendationPage>? catalog = widget.loadCatalog?.call(1);
+  final extraBooks = <BookInfo>[];
+  bool loadingNext = false, nextFailed = false;
+  bool? hasMoreAfterLoad;
+  int nextPage = 2;
   bool opening = false;
   bool newest = false, checking = false;
   int sortRun = 0, checked = 0;
   final updates = <int, BookInfo>{};
   final attempted = <int>{};
+
+  Future<void> loadNext(RecommendationPage firstPage) async {
+    if (loadingNext) return;
+    setState(() {
+      loadingNext = true;
+      nextFailed = false;
+    });
+    try {
+      final next = await widget.loadCatalog!(nextPage);
+      if (!mounted) return;
+      final seen = {
+        ...firstPage.books,
+        ...extraBooks,
+      }.map((book) => book.Id).toSet();
+      setState(() {
+        extraBooks.addAll(next.books.where((book) => seen.add(book.Id)));
+        hasMoreAfterLoad = next.hasMore;
+        nextPage++;
+      });
+      if (newest) checkUpdates([...firstPage.books, ...extraBooks]);
+    } catch (_) {
+      if (mounted) setState(() => nextFailed = true);
+    } finally {
+      if (mounted) setState(() => loadingNext = false);
+    }
+  }
 
   Future<void> checkUpdates(List<BookInfo> books) async {
     final run = ++sortRun;
@@ -163,10 +193,12 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<List<BookInfo>>(
+  Widget build(BuildContext context) => FutureBuilder<RecommendationPage>(
     future: catalog,
     builder: (context, snapshot) {
-      final original = snapshot.data ?? widget.preview;
+      final firstPage = snapshot.data;
+      final original = [...(firstPage?.books ?? widget.preview), ...extraBooks];
+      final hasMore = hasMoreAfterLoad ?? firstPage?.hasMore ?? false;
       final dated = original.map((book) => updates[book.Id] ?? book);
       final books = newest ? BookSources.recentFirst(dated) : dated.toList();
       final failed = snapshot.hasError;
@@ -187,7 +219,7 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
             constraints: const BoxConstraints(maxWidth: 800),
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
-              itemCount: books.length + header,
+              itemCount: books.length + header + (hasMore ? 1 : 0),
               itemBuilder: (context, index) {
                 if (canSort && index == 0) {
                   return sortOptions(
@@ -203,11 +235,27 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
                       const Text('更多书单暂时无法加载'),
                       TextButton(
                         onPressed: () => setState(
-                          () => catalog = widget.loadCatalog?.call(),
+                          () => catalog = widget.loadCatalog?.call(1),
                         ),
                         child: const Text('重试'),
                       ),
                     ],
+                  );
+                }
+                if (index == books.length + header) {
+                  return Center(
+                    child: TextButton(
+                      onPressed: loadingNext
+                          ? null
+                          : () => loadNext(firstPage!),
+                      child: Text(
+                        loadingNext
+                            ? '正在加载'
+                            : nextFailed
+                            ? '加载失败，重试'
+                            : '加载更多',
+                      ),
+                    ),
                   );
                 }
                 final book = books[index - header];
