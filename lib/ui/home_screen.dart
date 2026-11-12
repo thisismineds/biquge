@@ -74,6 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
     String title,
     List<BookInfo> books, {
     Future<List<BookInfo>> Function()? loadCatalog,
+    bool allowUpdateSort = false,
   }) => Navigator.push<void>(
     context,
     MaterialPageRoute(
@@ -82,6 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
         title: title,
         preview: books,
         loadCatalog: loadCatalog,
+        allowUpdateSort: allowUpdateSort,
       ),
     ),
   );
@@ -187,6 +189,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           preview,
                           loadCatalog: () => widget.store.sources
                               .recommendationCatalog(selected),
+                          allowUpdateSort: selected != null,
                         ),
                       ),
                       const SizedBox(height: 8),

@@ -1,14 +1,58 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qingyue/entity/BookInfo.dart';
 import 'package:qingyue/main.dart';
 import 'package:qingyue/service/book_sources.dart';
 import 'package:qingyue/storage/app_store.dart';
+import 'package:qingyue/ui/recommendation_list_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'book_sources_test.dart' show FixtureAdapter, jsonBody;
 
 void main() {
+  testWidgets('retry advances to unqueried books after a group of failures', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final books = [
+      for (var i = 1; i <= 9; i++) BookInfo.id(i, '示例书$i')..sourceId = 'bqg631',
+    ];
+    final requested = <String>{};
+    final client = Dio()
+      ..httpClientAdapter = FixtureAdapter((o) async {
+        final id = o.queryParameters['id'] as String;
+        requested.add(id);
+        return id == '9'
+            ? jsonBody({'id': 9, 'title': '示例书9', 'lastupdate': '2026-11-12'})
+            : ResponseBody.fromString('', 404);
+      });
+    final store = AppStore(
+      await SharedPreferences.getInstance(),
+      sources: BookSources(client: client),
+    );
+    await tester.pumpWidget(
+      ReaderApp(
+        store: store,
+        home: RecommendationListScreen(
+          store: store,
+          title: '玄幻奇幻',
+          preview: books,
+          loadCatalog: () async => books,
+          allowUpdateSort: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ChoiceChip, '最近更新'));
+    await tester.pumpAndSettle();
+    expect(requested, isNot(contains('9')));
+    await tester.tap(find.text('补查'));
+    await tester.pumpAndSettle();
+    expect(requested, contains('9'));
+    expect(find.text('2026-11-12 更新'), findsOneWidget);
+  });
+
   test(
     'recent updates sort newest first and retain source order on the same day',
     () async {
@@ -70,8 +114,27 @@ void main() {
             return jsonBody({
               'data': [
                 {'id': 13, 'title': '更多分类书籍', 'author': '另一位作者'},
+                {'id': 15, 'title': '日期未知的书'},
+                {'id': 14, 'title': '刚更新的书', 'author': '更新作者'},
               ],
             });
+          }
+          if (o.queryParameters['id'] == '13') {
+            return jsonBody({
+              'id': 13,
+              'title': '更多分类书籍',
+              'lastupdate': '2025-01-01',
+            });
+          }
+          if (o.queryParameters['id'] == '14') {
+            return jsonBody({
+              'id': 14,
+              'title': '刚更新的书',
+              'lastupdate': '2026-11-12',
+            });
+          }
+          if (o.queryParameters['id'] == '15') {
+            return jsonBody({'id': 15, 'title': '日期未知的书'});
           }
           detailIds.add(o.queryParameters['id'] as String);
           return jsonBody({
@@ -98,6 +161,23 @@ void main() {
       await tester.pumpAndSettle();
       expect(catalogs, ['xuanhuan']);
       expect(find.text('更多分类书籍'), findsWidgets);
+      await tester.tap(find.widgetWithText(ChoiceChip, '最近更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('2026-11-12 更新'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('刚更新的书').last).dy,
+        lessThan(tester.getTopLeft(find.text('更多分类书籍').last).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('日期未知的书').last).dy,
+        greaterThan(tester.getTopLeft(find.text('更多分类书籍').last).dy),
+      );
+      await tester.tap(find.widgetWithText(ChoiceChip, '书源顺序'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('更多分类书籍').last).dy,
+        lessThan(tester.getTopLeft(find.text('刚更新的书').last).dy),
+      );
       await tester.pageBack();
       await tester.pumpAndSettle();
 

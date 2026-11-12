@@ -39,6 +39,8 @@ class BookSources {
   static const bqgHosts = ['apibi.cc', 'apiqu.cc', 'apige.cc'];
   String? bqgHost;
   final Map<(int, int), String> _bqgFallbackByChapter = {};
+  final Map<(String, int), (DateTime, BookInfo)> _recommendationDetails = {};
+  final Map<(String, int), Future<BookInfo>> _recommendationRequests = {};
   final Dio client;
 
   BookSources({Dio? client})
@@ -235,27 +237,54 @@ class BookSources {
     }
     if (sections.isEmpty) throw SourceException('书源暂时没有推荐书籍。');
     if (sections['uplist'] case final recent?) {
-      // The site's short dates use its China calendar, regardless of device zone.
-      final now = DateTime.now().toUtc().add(const Duration(hours: 8));
-      final today = DateTime.utc(now.year, now.month, now.day);
-      final ranked =
-          recent.indexed
-              .map(
-                (entry) => (
-                  order: entry.$1,
-                  book: entry.$2,
-                  date: _updateRank(entry.$2.LastTime, today),
-                ),
-              )
-              .toList()
-            ..sort(
-              (a, b) => a.date == b.date
-                  ? a.order.compareTo(b.order)
-                  : b.date.compareTo(a.date),
-            );
-      sections['uplist'] = ranked.map((entry) => entry.book).toList();
+      sections['uplist'] = recentFirst(recent);
     }
     return sections;
+  }
+
+  Future<BookInfo> recommendationDetail(BookInfo book) async {
+    final key = (book.sourceId, book.Id);
+    final cached = _recommendationDetails[key];
+    if (cached != null &&
+        DateTime.now().difference(cached.$1) < const Duration(minutes: 10)) {
+      return cached.$2;
+    }
+    final pending = _recommendationRequests[key];
+    if (pending != null) return pending;
+    final request = detail(book.sourceId, book.Id).then((data) {
+      final result = BookInfo.fromJson(data);
+      if (result.Id != book.Id) throw SourceException('书源返回了不同的书籍。');
+      _recommendationDetails[key] = (DateTime.now(), result);
+      return result;
+    });
+    _recommendationRequests[key] = request;
+    try {
+      return await request;
+    } finally {
+      _recommendationRequests.remove(key);
+    }
+  }
+
+  static List<BookInfo> recentFirst(Iterable<BookInfo> books) {
+    // The site's short dates use its China calendar, regardless of device zone.
+    final now = DateTime.now().toUtc().add(const Duration(hours: 8));
+    final today = DateTime.utc(now.year, now.month, now.day);
+    final ranked =
+        books.indexed
+            .map(
+              (entry) => (
+                order: entry.$1,
+                book: entry.$2,
+                date: _updateRank(entry.$2.LastTime, today),
+              ),
+            )
+            .toList()
+          ..sort(
+            (a, b) => a.date == b.date
+                ? a.order.compareTo(b.order)
+                : b.date.compareTo(a.date),
+          );
+    return ranked.map((entry) => entry.book).toList();
   }
 
   Future<List<BookInfo>> recommendationCatalog(String? category) async {
@@ -306,7 +335,7 @@ class BookSources {
     return books;
   }
 
-  int _updateRank(String value, DateTime today) {
+  static int _updateRank(String value, DateTime today) {
     final date = DateTime.tryParse(value);
     if (date != null) {
       return DateTime.utc(

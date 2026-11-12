@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../entity/BookInfo.dart';
+import '../service/book_sources.dart';
 import '../storage/app_store.dart';
 import 'book_cover.dart';
 import 'book_details.dart';
@@ -14,13 +15,12 @@ Future<void> openRecommendedBook(
   bool visible() =>
       (active?.call() ?? true) && ModalRoute.isCurrentOf(context) == true;
   try {
-    final data = await store.sources.detail(book.sourceId, book.Id);
+    final detail = await store.sources.recommendationDetail(book);
     if (!context.mounted || !visible()) return;
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            BookDetails(store: store, book: BookInfo.fromJson(data)),
+        builder: (_) => BookDetails(store: store, book: detail),
       ),
     );
   } catch (_) {
@@ -36,6 +36,7 @@ class RecommendationListScreen extends StatefulWidget {
   final String title;
   final List<BookInfo> preview;
   final Future<List<BookInfo>> Function()? loadCatalog;
+  final bool allowUpdateSort;
 
   const RecommendationListScreen({
     super.key,
@@ -43,6 +44,7 @@ class RecommendationListScreen extends StatefulWidget {
     required this.title,
     required this.preview,
     this.loadCatalog,
+    this.allowUpdateSort = false,
   });
 
   @override
@@ -53,6 +55,102 @@ class RecommendationListScreen extends StatefulWidget {
 class _RecommendationListScreenState extends State<RecommendationListScreen> {
   late Future<List<BookInfo>>? catalog = widget.loadCatalog?.call();
   bool opening = false;
+  bool newest = false, checking = false;
+  int sortRun = 0, checked = 0;
+  final updates = <int, BookInfo>{};
+  final attempted = <int>{};
+
+  Future<void> checkUpdates(List<BookInfo> books) async {
+    final run = ++sortRun;
+    final missing = books.where(
+      (book) => book.LastTime.isEmpty && !updates.containsKey(book.Id),
+    );
+    final pending = [
+      ...missing.where((book) => !attempted.contains(book.Id)),
+      ...missing.where((book) => attempted.contains(book.Id)),
+    ];
+    setState(() {
+      newest = true;
+      checking = pending.isNotEmpty;
+      checked = books.length - pending.length;
+    });
+    var failedBatches = 0;
+    for (var i = 0; i < pending.length; i += 4) {
+      final requests = pending.skip(i).take(4);
+      final batch = await Future.wait(
+        requests.map((book) async {
+          try {
+            return await widget.store.sources.recommendationDetail(book);
+          } catch (_) {
+            return null;
+          }
+        }),
+      );
+      if (!mounted || run != sortRun) return;
+      setState(() {
+        attempted.addAll(requests.map((book) => book.Id));
+        for (final book in batch.nonNulls) {
+          updates[book.Id] = book;
+        }
+        checked += batch.length;
+      });
+      failedBatches = batch.every((book) => book == null)
+          ? failedBatches + 1
+          : 0;
+      if (failedBatches == 2) break;
+    }
+    if (mounted && run == sortRun) setState(() => checking = false);
+  }
+
+  Widget sortOptions(List<BookInfo> books, int unknownDates) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          children: [
+            ChoiceChip(
+              label: const Text('书源顺序'),
+              selected: !newest,
+              onSelected: (selected) {
+                if (!selected) return;
+                setState(() {
+                  sortRun++;
+                  newest = false;
+                  checking = false;
+                });
+              },
+            ),
+            ChoiceChip(
+              label: const Text('最近更新'),
+              selected: newest,
+              onSelected: (selected) {
+                if (selected) checkUpdates(books);
+              },
+            ),
+          ],
+        ),
+        if (newest && checking) Text('正在查询更新时间 $checked / ${books.length}'),
+        if (newest && !checking && unknownDates > 0)
+          Wrap(
+            spacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text('$unknownDates 本书暂无更新时间，已放在列表末尾'),
+              if (books.any(
+                (book) =>
+                    book.LastTime.isEmpty && !updates.containsKey(book.Id),
+              ))
+                TextButton(
+                  onPressed: () => checkUpdates(books),
+                  child: const Text('补查'),
+                ),
+            ],
+          ),
+      ],
+    ),
+  );
 
   Future<void> open(BookInfo book) async {
     if (opening) return;
@@ -68,8 +166,12 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
   Widget build(BuildContext context) => FutureBuilder<List<BookInfo>>(
     future: catalog,
     builder: (context, snapshot) {
-      final books = snapshot.data ?? widget.preview;
+      final original = snapshot.data ?? widget.preview;
+      final dated = original.map((book) => updates[book.Id] ?? book);
+      final books = newest ? BookSources.recentFirst(dated) : dated.toList();
       final failed = snapshot.hasError;
+      final canSort = widget.allowUpdateSort && snapshot.hasData;
+      final header = failed || canSort ? 1 : 0;
       return Scaffold(
         appBar: AppBar(
           title: Text(widget.title),
@@ -85,8 +187,14 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
             constraints: const BoxConstraints(maxWidth: 800),
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
-              itemCount: books.length + (failed ? 1 : 0),
+              itemCount: books.length + header,
               itemBuilder: (context, index) {
+                if (canSort && index == 0) {
+                  return sortOptions(
+                    original,
+                    books.where((book) => book.LastTime.isEmpty).length,
+                  );
+                }
                 if (failed && index == 0) {
                   return Wrap(
                     spacing: 8,
@@ -102,8 +210,9 @@ class _RecommendationListScreenState extends State<RecommendationListScreen> {
                     ],
                   );
                 }
-                final book = books[index - (failed ? 1 : 0)];
+                final book = books[index - header];
                 return RecommendationBookTile(
+                  key: ValueKey((book.sourceId, book.Id)),
                   book: book,
                   onTap: opening ? null : () => open(book),
                 );
