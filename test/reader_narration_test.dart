@@ -34,7 +34,7 @@ void main() {
     narration = ReaderNarration(
       onChapterFinished: () => chaptersFinished++,
       onError: errors.add,
-    );
+    )..voice = 'voice-a';
     messenger.setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
       return null;
@@ -75,6 +75,20 @@ void main() {
       expect(narration.playing, isFalse);
       expect(narration.paused, isFalse);
       expect(errors, isEmpty);
+    },
+  );
+
+  test(
+    'natural voice keeps a short paragraph together with its punctuation',
+    () async {
+      narration.voice = 'qingyue:offline-zh';
+      narration.start('他停了一下。然后问，你真的要走吗？\n她点了点头。');
+      final first = spoken().single;
+      expect(text(first), '他停了一下。然后问，你真的要走吗？\n');
+      await event('finished', id(first));
+      expect(text(spoken().last), '她点了点头。');
+      await event('finished', id(spoken().last));
+      expect(chaptersFinished, 1);
     },
   );
 

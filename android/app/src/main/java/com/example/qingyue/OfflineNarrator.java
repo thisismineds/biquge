@@ -13,11 +13,11 @@ import android.util.Log;
 import com.k2fsa.sherpa.onnx.GeneratedAudio;
 import com.k2fsa.sherpa.onnx.OfflineTts;
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig;
+import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig;
-import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig;
 
 import java.io.IOException;
-import java.io.InputStream;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
@@ -26,24 +26,24 @@ import kotlin.jvm.functions.Function1;
 
 final class OfflineNarrator implements AutoCloseable {
     private static final String TAG = "QingyueOfflineTts";
-    private static final String DIR = "tts/vits-icefall-zh-aishell3/";
-    private static final String MODEL = DIR + "model.onnx";
-    private static final String LEXICON = DIR + "lexicon.txt";
-    private static final String TOKENS = DIR + "tokens.txt";
-    private static final String[] RULES = {
-            DIR + "phone.fst", DIR + "date.fst", DIR + "number.fst"
+    private static final String MODEL_DIRECTORY = "tts/kokoro-int8-multi-lang-v1_1";
+    private static final String[] MODEL_FILES = {
+            "model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt",
+            "lexicon-zh.txt", "phone-zh.fst", "date-zh.fst", "number-zh.fst"
     };
 
     enum Voice {
-        FIRST("qingyue:offline-zh", 10),
-        SECOND("qingyue:offline-zh-2", 33),
-        THIRD("qingyue:offline-zh-3", 99);
+        FIRST("qingyue:offline-zh", "清阅普通话男声1", 58),
+        SECOND("qingyue:offline-zh-2", "清阅普通话男声2", 95),
+        THIRD("qingyue:offline-zh-3", "清阅普通话女声", 3);
 
         final String id;
+        final String name;
         final int speakerId;
 
-        Voice(String id, int speakerId) {
+        Voice(String id, String name, int speakerId) {
             this.id = id;
+            this.name = name;
             this.speakerId = speakerId;
         }
 
@@ -57,10 +57,10 @@ final class OfflineNarrator implements AutoCloseable {
     }
 
     private final AssetManager assets;
+    private final boolean available;
     private final String failureMessage;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final boolean available;
 
     private volatile long generation;
     // The synthesizer belongs exclusively to the worker. The playing track belongs to main.
@@ -84,46 +84,53 @@ final class OfflineNarrator implements AutoCloseable {
     OfflineNarrator(Context context) {
         assets = context.getAssets();
         failureMessage = context.getString(R.string.tts_offline_failed);
-        available = hasAsset(MODEL) && hasAsset(LEXICON) && hasAsset(TOKENS);
+        available = modelAssetsAvailable(assets);
     }
 
     boolean isAvailable() {
         return available;
     }
 
-    private boolean hasAsset(String path) {
-        try (InputStream ignored = assets.open(path)) {
-            return true;
-        } catch (IOException missing) {
+    private static boolean modelAssetsAvailable(AssetManager assets) {
+        try {
+            String[] files = assets.list(MODEL_DIRECTORY);
+            return files != null && Arrays.asList(files).containsAll(Arrays.asList(MODEL_FILES));
+        } catch (IOException missingAssets) {
             return false;
         }
     }
 
     private OfflineTts synthesizer() {
         if (tts == null) {
-            OfflineTtsVitsModelConfig vits = new OfflineTtsVitsModelConfig();
-            vits.setModel(MODEL);
-            vits.setLexicon(LEXICON);
-            vits.setTokens(TOKENS);
+            if (!isAvailable()) throw new IllegalStateException("Missing narrator model");
+            OfflineTtsKokoroModelConfig kokoro = new OfflineTtsKokoroModelConfig();
+            kokoro.setModel(modelPath("model.int8.onnx"));
+            kokoro.setVoices(modelPath("voices.bin"));
+            kokoro.setTokens(modelPath("tokens.txt"));
+            kokoro.setLexicon(modelPath("lexicon-us-en.txt") + ","
+                    + modelPath("lexicon-zh.txt"));
 
             OfflineTtsModelConfig model = new OfflineTtsModelConfig();
-            model.setVits(vits);
+            model.setKokoro(kokoro);
             model.setNumThreads(Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors())));
 
             OfflineTtsConfig config = new OfflineTtsConfig();
             config.setModel(model);
-            StringBuilder rulePaths = new StringBuilder();
-            for (String rule : RULES) {
-                if (hasAsset(rule)) {
-                    if (rulePaths.length() > 0) rulePaths.append(',');
-                    rulePaths.append(rule);
-                }
+            config.setRuleFsts(modelPath("phone-zh.fst") + ","
+                    + modelPath("date-zh.fst") + ","
+                    + modelPath("number-zh.fst"));
+            OfflineTts candidate = new OfflineTts(assets, config);
+            if (candidate.sampleRate() <= 0) {
+                candidate.release();
+                throw new IllegalStateException("Invalid synthesis sample rate");
             }
-            config.setRuleFsts(rulePaths.toString());
-            tts = new OfflineTts(assets, config);
-            if (tts.sampleRate() <= 0) throw new IllegalStateException("Invalid synthesis sample rate");
+            tts = candidate;
         }
         return tts;
+    }
+
+    private static String modelPath(String name) {
+        return MODEL_DIRECTORY + "/" + name;
     }
 
     void speak(String text, float speed, Voice voice, Consumer<String> completion) {

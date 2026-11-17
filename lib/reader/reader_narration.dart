@@ -160,11 +160,11 @@ class ReaderNarration extends ChangeNotifier {
 
   void _speakNext() {
     final text = _text!;
+    final natural = _voice == null || _voice!.startsWith('qingyue:offline-zh');
     while (_offset < text.length) {
-      var end = math.min(_offset + 250, text.length);
+      var end = math.min(_offset + (natural ? 100 : 250), text.length);
       if (end < text.length && _isLowSurrogate(text.codeUnitAt(end))) end--;
-      final match = _sentenceEnd.firstMatch(text.substring(_offset, end));
-      _segmentEnd = match == null ? end : _offset + match.end;
+      _segmentEnd = _readableBoundary(text, end, natural);
       final segment = text.substring(_offset, _segmentEnd);
       if (segment.trim().isNotEmpty) {
         final id = ++_nextId;
@@ -177,6 +177,21 @@ class ReaderNarration extends ChangeNotifier {
     _reset();
     notifyListeners();
     onChapterFinished();
+  }
+
+  int _readableBoundary(String text, int limit, bool natural) {
+    final section = text.substring(_offset, limit);
+    var sentences = 0, lastBoundary = 0;
+    for (final breakPoint in _sentenceEnd.allMatches(section)) {
+      lastBoundary = breakPoint.end;
+      if (!natural || breakPoint[0] == '\n' || ++sentences == 3) {
+        return _offset + lastBoundary;
+      }
+    }
+    // Keep neighboring sentences together so the model sees their punctuation and context.
+    return limit < text.length && lastBoundary >= 40
+        ? _offset + lastBoundary
+        : limit;
   }
 
   Future<void> _speak(int id, String segment) async {

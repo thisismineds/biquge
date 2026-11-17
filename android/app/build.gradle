@@ -11,7 +11,7 @@ if (keystorePropertiesFile.exists()) {
 def debugKeystore = System.getenv('QINGYUE_DEBUG_KEYSTORE')
 def offlineTtsDir = file('offline-tts')
 def offlineTtsAar = new File(offlineTtsDir, 'sherpa-onnx-static-link-onnxruntime-2.0.1.aar')
-def offlineTtsAssets = new File(offlineTtsDir, 'aishell-assets')
+def offlineTtsAssets = new File(offlineTtsDir, 'library-assets')
 
 android {
     namespace 'com.example.qingyue'
@@ -67,10 +67,10 @@ dependencies {
 
 tasks.named('preBuild').configure {
     doFirst {
-        def voice = new File(offlineTtsAssets, 'tts/vits-icefall-zh-aishell3')
-        def requiredVoiceFiles = ['model.onnx', 'lexicon.txt', 'tokens.txt']
+        def voice = new File(offlineTtsAssets, 'tts/kokoro-int8-multi-lang-v1_1')
+        def requiredVoiceFiles = ['model.int8.onnx', 'voices.bin', 'tokens.txt', 'lexicon-us-en.txt', 'lexicon-zh.txt', 'phone-zh.fst', 'date-zh.fst', 'number-zh.fst', 'LICENSE']
         if (!offlineTtsAar.isFile() || requiredVoiceFiles.any { !new File(voice, it).isFile() }) {
-            throw new GradleException('Offline voice files are missing. Run tool/prepare_offline_voice.ps1 from the repository.')
+            throw new GradleException('Offline library or Kokoro model is missing. Run tool/prepare_offline_voice.ps1 from the repository.')
         }
     }
 }

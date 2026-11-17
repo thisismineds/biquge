@@ -326,8 +326,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                       ),
                       voiceTile(null, '自动选择'),
                       ListTile(
-                        leading: const Icon(Icons.download_outlined),
-                        title: const Text('下载更多音色'),
+                        leading: const Icon(Icons.settings_outlined),
+                        title: const Text('系统语音设置'),
                         subtitle: const Text('打开手机的语音引擎设置'),
                         onTap: () => _installNarrationVoices(context),
                       ),

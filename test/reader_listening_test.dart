@@ -74,7 +74,7 @@ void main() {
       await tester.tap(find.text('音色'));
       await tester.pumpAndSettle();
       expect(find.text('测试普通话音色'), findsNothing);
-      await tester.tap(find.text('下载更多音色'));
+      await tester.tap(find.text('系统语音设置'));
       await tester.pumpAndSettle();
       expect(installs, 1);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);

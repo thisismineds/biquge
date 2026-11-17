@@ -50,14 +50,8 @@ public class MainActivity extends FlutterActivity {
                         List<Map<String, Object>> voices = new ArrayList<>();
                         if (offline != null && offline.isAvailable()) {
                             for (OfflineNarrator.Voice voice : OfflineNarrator.Voice.values()) {
-                                voices.add(voiceEntry(voice.id,
-                                        getString(R.string.tts_offline_voice, voice.ordinal() + 1),
-                                        false));
+                                voices.add(voiceEntry(voice.id, voice.name, false));
                             }
-                        }
-                        if (readyEngine == null && voices.isEmpty()) {
-                            result.error("engine", getString(R.string.tts_engine_unavailable), null);
-                            return;
                         }
                         if (readyEngine != null) {
                             for (Voice voice : chineseVoices(readyEngine)) {
@@ -240,8 +234,7 @@ public class MainActivity extends FlutterActivity {
         stopSpeech();
         long generation = speechGeneration;
         OfflineNarrator.Voice offlineVoice = OfflineNarrator.Voice.select(voiceId);
-        if (offlineVoice != null
-                && (voiceId != null || (offline != null && offline.isAvailable()))) {
+        if (offlineVoice != null) {
             if (offline == null || !offline.isAvailable()) {
                 result.error("voice", getString(R.string.tts_offline_failed), null);
                 return;
@@ -263,20 +256,9 @@ public class MainActivity extends FlutterActivity {
                 result.error("engine", getString(R.string.tts_engine_unavailable), null);
                 return;
             }
-            List<Voice> voices = chineseVoices(readyEngine);
-            boolean languageReady;
-            if (voiceId != null) {
-                languageReady = voices.stream().anyMatch(voice ->
-                        voiceId.equals(voice.getName())
-                                && readyEngine.setVoice(voice) == TextToSpeech.SUCCESS);
-            } else {
-                languageReady = voices.stream().anyMatch(voice ->
-                        !voice.isNetworkConnectionRequired()
-                                && readyEngine.setVoice(voice) == TextToSpeech.SUCCESS);
-                if (!languageReady) {
-                    languageReady = readyEngine.setLanguage(Locale.SIMPLIFIED_CHINESE) >= 0;
-                }
-            }
+            boolean languageReady = chineseVoices(readyEngine).stream().anyMatch(voice ->
+                    voiceId.equals(voice.getName())
+                            && readyEngine.setVoice(voice) == TextToSpeech.SUCCESS);
             if (!languageReady) {
                 result.error("voice", getString(R.string.tts_voice_unavailable), null);
                 return;
