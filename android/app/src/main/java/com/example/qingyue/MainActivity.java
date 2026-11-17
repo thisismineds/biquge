@@ -238,8 +238,9 @@ public class MainActivity extends FlutterActivity {
     }
 
     private void prepare(Number id, String text, Number rate, String voiceId) {
-        OfflineNarrator.Voice voice = OfflineNarrator.Voice.select(voiceId);
-        if (voice != null && offline != null && offline.isAvailable(voice) && validSpeech(id, text, rate)) {
+        if (offline == null) return;
+        OfflineNarrator.Voice voice = offline.selectVoice(voiceId);
+        if (voice != null && offline.isAvailable(voice) && validSpeech(id, text, rate)) {
             offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice);
         }
     }
@@ -251,7 +252,8 @@ public class MainActivity extends FlutterActivity {
         }
         resetSpeechCallback();
         long generation = speechGeneration;
-        OfflineNarrator.Voice offlineVoice = OfflineNarrator.Voice.select(voiceId);
+        OfflineNarrator.Voice offlineVoice = offline == null ? OfflineNarrator.Voice.select(voiceId)
+                : offline.selectVoice(voiceId);
         if (offlineVoice != null) {
             if (offline == null || !offline.isAvailable(offlineVoice)) {
                 result.error("voice", getString(R.string.tts_offline_failed), null);

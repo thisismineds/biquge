@@ -5,6 +5,7 @@ import android.content.res.AssetManager;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
+import android.media.PlaybackParams;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -17,7 +18,14 @@ import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig;
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig;
 
+import ai.onnxruntime.OrtException;
+
+import org.json.JSONException;
+
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -35,7 +43,12 @@ final class OfflineNarrator implements AutoCloseable {
                 "model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt",
                 "lexicon-zh.txt", "phone-zh.fst", "date-zh.fst", "number-zh.fst"),
         CHAOWEN("tts/chaowen-fast",
-                "model.onnx", "lexicon.txt", "tokens.txt", "phone.fst", "date.fst", "number.fst");
+                "model.onnx", "lexicon.txt", "tokens.txt", "phone.fst", "date.fst", "number.fst"),
+        BROADCAST("tts/broadcast-moss-v1", "browser_poc_manifest.json", "tts_browser_onnx_meta.json",
+                "qwen-reference-rvq.json", "tokenizer.onnx", "moss_tts_prefill.onnx",
+                "moss_tts_decode_step.onnx", "moss_tts_local_fixed_sampled_frame.onnx",
+                "moss_tts_global_shared_int8.data", "moss_tts_local_fixed_sampled_frame_int8.data",
+                "moss_audio_tokenizer_decode_full.onnx", "moss_audio_tokenizer_decode_shared.data");
 
         final String directory;
         final String[] requiredFiles;
@@ -51,11 +64,11 @@ final class OfflineNarrator implements AutoCloseable {
     }
 
     enum Voice {
+        CLEAR("qingyue:offline-zh-clear", "清朗播音 · 原创男声", Model.BROADCAST, 0),
         FIRST("qingyue:offline-zh", "清阅普通话男声1", Model.KOKORO, 58),
         SECOND("qingyue:offline-zh-2", "清阅普通话男声2", Model.KOKORO, 95),
         THIRD("qingyue:offline-zh-3", "清阅普通话女声", Model.KOKORO, 3),
-        CHAOWEN("qingyue:offline-zh-chaowen", "超文 · 轻量普通话男声", Model.CHAOWEN, 0),
-        CLEAR("qingyue:offline-zh-clear", "清朗播音 · 调校男声", Model.CHAOWEN, 0);
+        CHAOWEN("qingyue:offline-zh-chaowen", "超文 · 轻量普通话男声", Model.CHAOWEN, 0);
 
         final String id;
         final String name;
@@ -79,6 +92,7 @@ final class OfflineNarrator implements AutoCloseable {
     }
 
     private final AssetManager assets;
+    private final File modelStorage;
     private final EnumSet<Model> available = EnumSet.noneOf(Model.class);
     private final String failureMessage;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -87,6 +101,7 @@ final class OfflineNarrator implements AutoCloseable {
 
     // The synthesizer belongs exclusively to the worker. Playback slots belong to main.
     private OfflineTts tts;
+    private MossNarratorEngine broadcast;
     private Model loadedModel;
     private Segment current;
     private Segment prepared;
@@ -154,6 +169,7 @@ final class OfflineNarrator implements AutoCloseable {
 
     OfflineNarrator(Context context) {
         assets = context.getAssets();
+        modelStorage = context.getNoBackupFilesDir();
         failureMessage = context.getString(R.string.tts_offline_failed);
         for (Model model : Model.values()) {
             if (modelAssetsAvailable(assets, model)) available.add(model);
@@ -162,6 +178,13 @@ final class OfflineNarrator implements AutoCloseable {
 
     boolean isAvailable(Voice voice) {
         return available.contains(voice.model);
+    }
+
+    Voice selectVoice(String id) {
+        if (id == null || Voice.CLEAR.id.equals(id)) {
+            return isAvailable(Voice.CLEAR) ? Voice.CLEAR : Voice.FIRST;
+        }
+        return Voice.select(id);
     }
 
     private static boolean modelAssetsAvailable(AssetManager assets, Model model) {
@@ -217,11 +240,46 @@ final class OfflineNarrator implements AutoCloseable {
         return tts;
     }
 
+    private MossNarratorEngine broadcastSynthesizer() throws IOException, JSONException, OrtException {
+        if (broadcast != null) return broadcast;
+        releaseSynthesizer();
+        Model model = Model.BROADCAST;
+        // ONNX graphs share external weights. They need ordinary files in the same directory.
+        File directory = new File(modelStorage, model.directory);
+        if (!directory.mkdirs() && !directory.isDirectory()) {
+            throw new IOException("Could not prepare broadcast voice storage");
+        }
+        for (String name : model.requiredFiles) {
+            File destination = new File(directory, name);
+            if (destination.isFile()) continue;
+            File temporary = File.createTempFile("voice-", ".tmp", directory);
+            try {
+                try (InputStream source = assets.open(model.path(name), AssetManager.ACCESS_STREAMING);
+                     FileOutputStream output = new FileOutputStream(temporary)) {
+                    byte[] buffer = new byte[256 * 1024];
+                    int count;
+                    while ((count = source.read(buffer)) != -1) output.write(buffer, 0, count);
+                }
+                if (!temporary.renameTo(destination) && !destination.isFile()) {
+                    throw new IOException("Could not install broadcast voice component " + name);
+                }
+            } finally {
+                temporary.delete();
+            }
+        }
+        broadcast = new MossNarratorEngine(directory);
+        return broadcast;
+    }
+
     private void releaseSynthesizer() {
         OfflineTts previous = tts;
         tts = null;
         loadedModel = null;
         if (previous != null) previous.release();
+        if (broadcast != null) {
+            broadcast.close();
+            broadcast = null;
+        }
     }
 
     void prepare(long id, String text, float speed, Voice voice) {
@@ -258,16 +316,34 @@ final class OfflineNarrator implements AutoCloseable {
         if (segment.cancelled) return;
         AudioTrack track = null;
         try {
-            OfflineTts model = synthesizer(segment.voice);
-            if (segment.cancelled) return;
-            if (segment.voice.speakerId >= model.numSpeakers()) {
-                throw new IllegalStateException("Selected speaker is missing from the model");
+            float[] samples;
+            int sampleRate;
+            if (segment.voice == Voice.CLEAR) {
+                if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
+                    publish(segment, new BufferedSpeech(null, 0, 0, null));
+                    return;
+                }
+                long started = SystemClock.elapsedRealtime();
+                MossNarratorEngine model = broadcastSynthesizer();
+                if (segment.cancelled) return;
+                samples = model.synthesize(segment.text, () -> segment.cancelled);
+                sampleRate = model.sampleRate();
+                if (Log.isLoggable(TAG, Log.DEBUG)) {
+                    Log.d(TAG, "Broadcast synthesis ms=" + (SystemClock.elapsedRealtime() - started)
+                            + " audioMs=" + (samples.length * 1000L / sampleRate));
+                }
+            } else {
+                OfflineTts model = synthesizer(segment.voice);
+                if (segment.cancelled) return;
+                if (segment.voice.speakerId >= model.numSpeakers()) {
+                    throw new IllegalStateException("Selected speaker is missing from the model");
+                }
+                GeneratedAudio audio = model.generateWithCallback(segment.text, segment.voice.speakerId,
+                        segment.speed, new SynthesisCancellation(segment));
+                samples = audio.getSamples();
+                sampleRate = audio.getSampleRate();
             }
-            GeneratedAudio audio = model.generateWithCallback(segment.text, segment.voice.speakerId,
-                    segment.speed, new SynthesisCancellation(segment));
             if (segment.cancelled) return;
-            float[] samples = audio.getSamples();
-            int sampleRate = audio.getSampleRate();
             if (samples.length == 0 || sampleRate <= 0) {
                 if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
                     publish(segment, new BufferedSpeech(null, 0, 0, null));
@@ -275,7 +351,6 @@ final class OfflineNarrator implements AutoCloseable {
                 }
                 throw new IllegalStateException("No speech samples generated");
             }
-            if (segment.voice == Voice.CLEAR) NarrationEqualizer.apply(samples, sampleRate);
             short[] pcm = new short[samples.length];
             for (int i = 0; i < samples.length; i++) {
                 pcm[i] = (short) Math.round(Math.max(-1f, Math.min(1f, samples[i])) * 32767f);
@@ -299,7 +374,7 @@ final class OfflineNarrator implements AutoCloseable {
             }
             publish(segment, new BufferedSpeech(track, pcm.length, sampleRate, null));
             track = null;
-        } catch (RuntimeException | LinkageError failure) {
+        } catch (IOException | JSONException | OrtException | RuntimeException | LinkageError failure) {
             if (!segment.cancelled) {
                 Log.w(TAG, "Could not synthesize or buffer audio", failure);
                 publish(segment, new BufferedSpeech(null, 0, 0, failureMessage));
@@ -350,6 +425,9 @@ final class OfflineNarrator implements AutoCloseable {
                 public void onPeriodicNotification(AudioTrack ignored) {}
             }, main);
             track.setNotificationMarkerPosition(audio.frames);
+            if (segment.voice == Voice.CLEAR && segment.speed != 1f) {
+                track.setPlaybackParams(new PlaybackParams().setPitch(1f).setSpeed(segment.speed));
+            }
             track.play();
             long deadline = SystemClock.uptimeMillis()
                     + audio.frames * 1000L / audio.sampleRate + 5000;

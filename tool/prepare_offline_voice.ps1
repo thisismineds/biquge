@@ -1,4 +1,4 @@
-param([string]$Python = 'python')
+param([string]$Python = 'python', [string]$BroadcastSource)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -45,6 +45,42 @@ if (-not (Test-Path -LiteralPath (Join-Path $fastVoice 'model.onnx') -PathType L
     if ($LASTEXITCODE -ne 0) {
         throw 'Voice conversion needs Python 3 with onnx==1.23.2 and onnxruntime==1.28.0.'
     }
+}
+
+if ($BroadcastSource) {
+    # The approved voice pack stays on the build machine, outside Git.
+    $pack = @{
+        'lm/browser_poc_manifest.json'                       = '097d80e993dc29f0bae427590b4f77084a161cb578b50d82c29f455d5faa9eee'
+        'lm/tts_browser_onnx_meta.json'                       = '3edf25232dcd0af3d061c837e9a968a39e2f8592e06777d740503c4f2244f95c'
+        'lm/tokenizer.onnx'                                   = 'ceb5b5991cc6ba074c2884a32664ddaec66de5e7c72f7b74343d6bd83c059f6d'
+        'lm/moss_tts_prefill.onnx'                            = '25409338ab270f9cad4faea12e5ae9ee29dbc3cacb8ee9eafbc16fc85706b095'
+        'lm/moss_tts_decode_step.onnx'                        = '854d6d905f230e58b03fd12ca9a930d852086db231d10c00d21fb66f8a567aee'
+        'lm/moss_tts_local_fixed_sampled_frame.onnx'           = '3baf66aac8bb52e4d7adc9204299a4947788b100efdd07af198f117a59f120a6'
+        'lm/moss_tts_global_shared_int8.data'                  = 'b127207a2274826b113fd3f2c4917ef366535c3324dd0f8fe95d6355626a85bb'
+        'lm/moss_tts_local_fixed_sampled_frame_int8.data'      = 'dbbdde4c10bf59e7d63087c6688ca18bad46088d5e4c8c0b7d9e858304d44aa4'
+        'codec/moss_audio_tokenizer_decode_full.onnx'          = '0fbbafe3fd4afa2a019af5c5ced204af6e2d1db044fa40f021525d2aee95b4ac'
+        'codec/moss_audio_tokenizer_decode_shared.data'        = 'e69d52e0f4e84ca27850557ee54face46632d3a5a16c89bd246c7c408466dcad'
+        'qwen-reference-rvq.json'                             = 'c430d28ec05eaff6d24798a27ccb5933b3c7163caafbf470a0431b36272fdcd9'
+    }
+    foreach ($component in $pack.Keys) {
+        $source = Join-Path $BroadcastSource $component
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $pack[$component]) {
+            throw "Broadcast voice component is missing or differs from the approved pack: $source"
+        }
+    }
+    $broadcastVoice = Join-Path $voices 'broadcast-moss-v1'
+    New-Item -ItemType Directory -Path $broadcastVoice -Force | Out-Null
+    foreach ($component in $pack.Keys) {
+        Copy-Item -LiteralPath (Join-Path $BroadcastSource $component) -Destination $broadcastVoice
+    }
+    @'
+The original broadcast voice uses a synthetic Qwen3-TTS VoiceDesign reference.
+Qwen3-TTS (Apache-2.0): https://github.com/QwenLM/Qwen3-TTS
+MOSS-TTS-Nano and audio tokenizer (Apache-2.0): https://github.com/OpenMOSS/MOSS-TTS-Nano
+INT8 ONNX export (Apache-2.0): https://huggingface.co/REALBITS/MOSS-TTS-Nano-100M-ONNX-int8
+ONNX Runtime Extensions (MIT): https://github.com/microsoft/onnxruntime-extensions
+'@ | Set-Content -LiteralPath (Join-Path $broadcastVoice 'MODEL_CARD') -Encoding UTF8
 }
 
 $oldPath = $env:Path
