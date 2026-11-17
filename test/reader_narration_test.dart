@@ -18,11 +18,11 @@ void main() {
       calls.where((call) => call.method == 'speak').toList();
   int id(MethodCall call) => call.arguments['id'] as int;
   String text(MethodCall call) => call.arguments['text'] as String;
-  Future<void> event(String method, int id, {String? message}) =>
+  Future<void> event(String method, int id, {String? message, int? offset}) =>
       messenger.handlePlatformMessage(
         channel.name,
         codec.encodeMethodCall(
-          MethodCall(method, {'id': id, 'message': message}),
+          MethodCall(method, {'id': id, 'message': message, 'offset': offset}),
         ),
         (_) {},
       );
@@ -45,6 +45,34 @@ void main() {
     narration.dispose();
     messenger.setMockMethodCallHandler(channel, null);
   });
+
+  test(
+    'reports spoken offsets and ignores progress from an old utterance',
+    () async {
+      final offsets = <(int, bool)>[];
+      narration.dispose();
+      narration = ReaderNarration(
+        onChapterFinished: () => chaptersFinished++,
+        onError: errors.add,
+        onProgress: (offset, {required segmentStarted}) {
+          offsets.add((offset, segmentStarted));
+        },
+      )..voice = 'voice-a';
+      narration.start('跳过。甲🌱乙。下一句。', offset: 3);
+      final first = id(spoken().single);
+      expect(offsets, isEmpty);
+      await event('progress', first, offset: 2);
+      await event('progress', first, offset: 0);
+      await event('progress', first, offset: 200);
+      expect(offsets, [(4, true)]);
+
+      await event('finished', first);
+      final next = id(spoken().last);
+      await event('progress', first, offset: 3);
+      await event('progress', next, offset: 0);
+      expect(offsets, [(4, true), (7, false), (8, true)]);
+    },
+  );
 
   test(
     'pause, voice change and resume replay a sentence with a fresh ID',

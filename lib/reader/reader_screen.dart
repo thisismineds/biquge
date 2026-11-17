@@ -35,6 +35,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Record? _layoutKey;
   String? _error;
   int _chapter = 0, _page = 0, _pendingOffset = 0, _attempt = 0;
+  int? _spokenOffset;
   int _downloadCached = 0, _downloadTotal = 0;
   int _prefetchRun = 0;
   bool _attemptEnd = false;
@@ -49,6 +50,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   late final ReaderNarration _narration;
   AppStore get store => widget.store;
   bool get _canSwitchMirror => widget.book.sourceId == 'bqg631';
+  int get _visibleOffset =>
+      _pages.isEmpty ? _pendingOffset : _pages[_page].start;
 
   @override
   void initState() {
@@ -64,6 +67,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               }
             },
             onTransport: _listeningTransport,
+            onProgress: _showNarrationPosition,
           )
           ..voice = store.preferences.getString(_voicePreference)
           ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
@@ -160,6 +164,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _chapter = index;
         _text = text;
         _pendingOffset = offset;
+        _spokenOffset = null;
         _end = end;
         _page = 0;
         _pages = [];
@@ -207,6 +212,22 @@ class _ReaderScreenState extends State<ReaderScreen>
     unawaited(_open(_chapter + 1, readAloud: true));
   }
 
+  void _showNarrationPosition(int offset, {required bool segmentStarted}) {
+    if (!mounted || _busy) return;
+    _spokenOffset = offset;
+    if (_pages.isEmpty) {
+      // A chapter opened in the background may not have a laid-out page yet.
+      _pendingOffset = offset;
+      if (segmentStarted) unawaited(_save());
+      return;
+    }
+    final page = _pageAt(offset);
+    if (page == _page) return;
+    setState(() => _page = page);
+    _syncPageController();
+    unawaited(_save());
+  }
+
   void _updateListeningNotification() {
     _narration.updateBackground(
       widget.book.Name,
@@ -215,7 +236,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  void _listeningTransport(String action) {
+  void _listeningTransport(String action, {bool fromPage = false}) {
     if (!mounted || !_narration.backgroundActive) return;
     switch (action) {
       case 'pause':
@@ -223,7 +244,12 @@ class _ReaderScreenState extends State<ReaderScreen>
         _narration.pause();
       case 'resume':
         _listenOnReady = true;
-        _narration.resume();
+        if (fromPage) {
+          _spokenOffset = null;
+          _narration.start(_text, offset: _visibleOffset);
+        } else {
+          _narration.resume();
+        }
       case 'stop':
         _endListening();
         if (_listenPanel) setState(() => _listenPanel = false);
@@ -238,6 +264,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _listeningRun++;
     _startingPlayback = false;
     _listenOnReady = false;
+    _spokenOffset = null;
     _narration.stop();
     _narration.endBackground();
   }
@@ -247,10 +274,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_narration.playing) {
       _listeningTransport('pause');
     } else if (_narration.paused) {
-      _listeningTransport('resume');
+      _listeningTransport('resume', fromPage: true);
     } else {
       final run = ++_listeningRun;
-      final offset = _pages.isEmpty ? _pendingOffset : _pages[_page].start;
       _startingPlayback = true;
       _listenOnReady = true;
       try {
@@ -259,7 +285,11 @@ class _ReaderScreenState extends State<ReaderScreen>
           _chapters[_chapter].name,
         );
         if (!mounted || run != _listeningRun) return;
-        _narration.start(_text, offset: offset, paused: !_listenOnReady);
+        _narration.start(
+          _text,
+          offset: _visibleOffset,
+          paused: !_listenOnReady,
+        );
         _updateListeningNotification();
       } catch (error) {
         if (mounted && run == _listeningRun) {
@@ -528,13 +558,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       scaler,
     );
     if (signature == _layoutKey) return;
-    final anchor = _pages.isNotEmpty
-        ? _pages[_page.clamp(0, _pages.length - 1)].start
-        : _pendingOffset;
+    final anchor = _spokenOffset ?? _visibleOffset;
     _pages = paginateChapter(_text, size, style, textScaler: scaler);
     if (_pages.isEmpty) return;
-    _page = _end ? _pages.length - 1 : _pages.indexWhere((p) => anchor < p.end);
-    if (_page < 0) _page = _pages.length - 1;
+    _page = _end ? _pages.length - 1 : _pageAt(anchor);
     _end = false;
     _layoutKey = signature;
     final old = _controller;
@@ -548,19 +575,33 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
+  int _pageAt(int offset) {
+    final page = _pages.indexWhere((page) => offset < page.end);
+    return page < 0 ? _pages.length - 1 : page;
+  }
+
+  void _syncPageController() {
+    final controller = _controller;
+    if (controller != null && controller.hasClients) {
+      controller.jumpToPage(_page + 1);
+    }
+  }
+
   Future<void> _save() async {
     if (_text.isEmpty || _error != null || _busy) return;
     final tag = BookTag(_chapter, _page, _chapters, widget.book.Name)
       ..content = _text
       ..pageOffsets = _pages.map((p) => p.end).toList();
-    final offset = _pages.isEmpty ? _pendingOffset : _pages[_page].start;
-    await store.saveProgress(widget.book, tag, offset);
+    await store.saveProgress(widget.book, tag, _visibleOffset);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _voiceRefresh.value++;
+      if (!_busy && _spokenOffset != null && _pages.isNotEmpty) {
+        _syncPageController();
+      }
     } else {
       _save();
     }
@@ -605,11 +646,15 @@ class _ReaderScreenState extends State<ReaderScreen>
       } else {
         _controller?.jumpToPage(_pages.length);
       }
-    } else {
-      setState(() {
-        _page = index - 1;
-      });
-      _save();
+    } else if (index - 1 != _page) {
+      setState(() => _page = index - 1);
+      _spokenOffset = null;
+      if (_narration.backgroundActive) {
+        _listenOnReady = false;
+        _narration.start(_text, offset: _visibleOffset, paused: true);
+        _updateListeningNotification();
+      }
+      unawaited(_save());
     }
   }
 

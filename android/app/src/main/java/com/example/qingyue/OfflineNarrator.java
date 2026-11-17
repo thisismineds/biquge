@@ -32,6 +32,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 import kotlin.jvm.functions.Function1;
 
@@ -114,6 +115,7 @@ final class OfflineNarrator implements AutoCloseable {
         final float speed;
         final Voice voice;
         volatile boolean cancelled;
+        IntConsumer progress;
         Consumer<String> completion;
         BufferedSpeech ready;
         boolean retryOnPreparationFailure;
@@ -292,7 +294,8 @@ final class OfflineNarrator implements AutoCloseable {
         worker.execute(prepared);
     }
 
-    void speak(long id, String text, float speed, Voice voice, Consumer<String> completion) {
+    void speak(long id, String text, float speed, Voice voice, IntConsumer progress,
+               Consumer<String> completion) {
         discard(current);
         stopTrack();
         Segment next = prepared;
@@ -303,11 +306,13 @@ final class OfflineNarrator implements AutoCloseable {
                 Log.d(TAG, next.ready == null ? "Reused in-flight segment" : "Reused buffered segment");
             }
             current = next;
+            current.progress = progress;
             current.completion = completion;
             playWhenReady(next);
         } else {
             discard(next);
             current = new Segment(id, text, speed, voice);
+            current.progress = progress;
             current.completion = completion;
             worker.execute(current);
         }
@@ -430,18 +435,28 @@ final class OfflineNarrator implements AutoCloseable {
                 track.setPlaybackParams(new PlaybackParams().setPitch(1f).setSpeed(segment.speed));
             }
             track.play();
+            segment.progress.accept(0);
             long deadline = SystemClock.uptimeMillis()
                     + audio.frames * 1000L / audio.sampleRate + 5000;
             // Some devices miss a marker at the exact last frame. Check the actual head as a fallback.
             main.postDelayed(new Runnable() {
+                private int lastOffset;
+
                 @Override
                 public void run() {
                     if (segment != current || playing != track) return;
-                    if (track.getPlaybackHeadPosition() >= audio.frames) {
+                    int head = track.getPlaybackHeadPosition();
+                    if (head >= audio.frames) {
                         finish(segment, track, null);
                     } else if (SystemClock.uptimeMillis() >= deadline) {
                         finish(segment, track, failureMessage);
                     } else {
+                        // shortcut: Offline voices have no word times, so estimate from rendered frames.
+                        int offset = (int) ((long) head * segment.text.length() / audio.frames);
+                        if (offset > lastOffset) {
+                            lastOffset = offset;
+                            segment.progress.accept(offset);
+                        }
                         main.postDelayed(this, 250);
                     }
                 }

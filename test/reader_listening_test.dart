@@ -6,10 +6,107 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qingyue/entity/BookInfo.dart';
 import 'package:qingyue/main.dart';
 import 'package:qingyue/reader/reader_screen.dart';
+import 'package:qingyue/reader/reading_layout.dart';
 import 'package:qingyue/storage/app_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets(
+    'reader follows background audio and resumes from a browsed page',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const channel = MethodChannel('qingyue/tts');
+      const codec = StandardMethodCodec();
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final utterances = <Map<Object?, Object?>>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'speak') {
+          utterances.add(call.arguments as Map<Object?, Object?>);
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      addTearDown(() {
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+      });
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      final raw = List.generate(30, (i) => '第${i + 1}处石桥边有灯😀亮着，').join();
+      SharedPreferences.setMockInitialValues({
+        '42chapters': jsonEncode([
+          {'id': 51, 'name': '第一章', 'hasContent': 2},
+        ]),
+        '51': raw,
+      });
+      final store = AppStore(await SharedPreferences.getInstance());
+      final book = BookInfo.id(42, '听书翻页测试');
+      await tester.pumpWidget(
+        ReaderApp(
+          store: store,
+          home: ReaderScreen(store: store, book: book),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('听书'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放'));
+      await tester.pumpAndSettle();
+
+      Future<void> event(String method, Map<String, Object?> args) async {
+        await messenger.handlePlatformMessage(
+          channel.name,
+          codec.encodeMethodCall(MethodCall(method, args)),
+          (ByteData? _) {},
+        );
+        await tester.pump();
+      }
+
+      final ends = (store.record(book)!['pageOffsets'] as List).cast<int>();
+      final first = utterances.single;
+      final secondStart = (first['text'] as String).length;
+      final pageBeforeBoundary = ends.indexWhere((end) => secondStart < end);
+      final followedPage = pageBeforeBoundary + 1;
+      final browsedPage = followedPage + 1;
+      expect(pageBeforeBoundary, greaterThan(0));
+      expect(browsedPage, lessThan(ends.length));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await event('finished', {'id': first['id']});
+      expect(utterances, hasLength(2));
+      final second = utterances.last;
+      final spokenOffset = ends[pageBeforeBoundary] + 3 - secondStart;
+      expect((second['text'] as String).length, greaterThan(spokenOffset));
+      await event('progress', {'id': second['id'], 'offset': spokenOffset});
+      expect(store.record(book)?['index'], followedPage);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(find.text('第${followedPage + 1}/${ends.length}页'), findsOneWidget);
+      expect(
+        tester.widget<PageView>(find.byType(PageView)).controller!.page,
+        followedPage + 1,
+      );
+
+      await tester.tap(find.text('暂停'));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(PageView), const Offset(-310, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('第${browsedPage + 1}/${ends.length}页'), findsOneWidget);
+      final browsedStart = ends[browsedPage - 1];
+      expect(store.record(book)?['readerOffset'], browsedStart);
+      await tester.tap(find.text('继续'));
+      await tester.pumpAndSettle();
+      expect(utterances, hasLength(3));
+      final resumed = utterances.last['text'] as String;
+      expect(resumed, isNotEmpty);
+      expect(formatChapter(raw).substring(browsedStart), startsWith(resumed));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets(
     'reader remembers a voice and plays through the chapter boundary',
     (tester) async {

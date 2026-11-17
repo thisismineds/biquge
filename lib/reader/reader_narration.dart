@@ -5,13 +5,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 typedef NarrationVoice = ({String id, String label, bool networkRequired});
-typedef _NarrationSegment = ({int id, int end, String text});
+typedef _NarrationSegment = ({int id, int start, int end, String text});
 
 class ReaderNarration extends ChangeNotifier {
   ReaderNarration({
     required this.onChapterFinished,
     required this.onError,
     this.onTransport,
+    this.onProgress,
   });
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
@@ -23,13 +24,14 @@ class ReaderNarration extends ChangeNotifier {
   final VoidCallback onChapterFinished;
   final ValueChanged<String> onError;
   final ValueChanged<String>? onTransport;
+  final void Function(int offset, {required bool segmentStarted})? onProgress;
 
   String? _text;
   String? _voice;
   double _rate = 1.0;
   int _offset = 0;
-  int _segmentEnd = 0;
-  int? _utterance;
+  _NarrationSegment? _active;
+  int? _reportedOffset;
   _NarrationSegment? _prepared;
   bool _playing = false;
   bool _background = false;
@@ -164,8 +166,8 @@ class ReaderNarration extends ChangeNotifier {
     final current = _prepared ?? _segmentAt(_offset);
     _prepared = null;
     if (current != null) {
-      _segmentEnd = current.end;
-      _utterance = current.id;
+      _active = current;
+      _reportedOffset = null;
       unawaited(_sendSegment('speak', current));
       if (_usesOfflineVoice) {
         final next = _segmentAt(current.end);
@@ -195,7 +197,7 @@ class ReaderNarration extends ChangeNotifier {
       final end = _readableBoundary(text, offset, limit, offline);
       final segment = text.substring(offset, end);
       if (segment.trim().isNotEmpty) {
-        return (id: ++_nextId, end: end, text: segment);
+        return (id: ++_nextId, start: offset, end: end, text: segment);
       }
       offset = end;
     }
@@ -243,27 +245,50 @@ class ReaderNarration extends ChangeNotifier {
       }
       return;
     }
-    if (args is! Map || args['id'] is! int || args['id'] != _utterance) return;
-    if (call.method == 'finished') {
-      _utterance = null;
-      _offset = _segmentEnd;
+    final active = _active;
+    if (active == null ||
+        args is! Map ||
+        args['id'] is! int ||
+        args['id'] != active.id) {
+      return;
+    }
+    if (call.method == 'progress') {
+      final offset = args['offset'];
+      if (offset is int && offset >= 0 && offset < active.text.length) {
+        _reportProgress(active, offset);
+      }
+    } else if (call.method == 'finished') {
+      _reportProgress(active, active.text.length - 1);
+      _active = null;
+      _offset = active.end;
       _speakNext();
     } else if (call.method == 'error') {
       final message = args['message'];
-      _fail(args['id'] as int, message is String ? message : '朗读中断，请重试。');
+      _fail(active.id, message is String ? message : '朗读中断，请重试。');
     }
   }
 
+  void _reportProgress(_NarrationSegment segment, int offset) {
+    if (offset > 0 && _isLowSurrogate(segment.text.codeUnitAt(offset))) {
+      offset--;
+    }
+    final position = segment.start + offset;
+    final previous = _reportedOffset;
+    if (previous != null && position <= previous) return;
+    _reportedOffset = position;
+    onProgress?.call(position, segmentStarted: previous == null);
+  }
+
   void _fail(int id, String message) {
-    if (id != _utterance) return;
+    if (id != _active?.id) return;
     _reset();
     notifyListeners();
     onError(message);
   }
 
   void _endUtterance() {
-    if (_utterance == null && _prepared == null) return;
-    _utterance = null;
+    if (_active == null && _prepared == null) return;
+    _active = null;
     _prepared = null;
     unawaited(_stopEngine());
   }

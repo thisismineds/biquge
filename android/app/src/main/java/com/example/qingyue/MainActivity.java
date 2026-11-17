@@ -37,6 +37,7 @@ public class MainActivity extends FlutterActivity {
     private long speechGeneration;
     private Number activeId;
     private String activeToken;
+    private int lastProgressOffset = -1;
 
     @Override
     public void configureFlutterEngine(FlutterEngine flutterEngine) {
@@ -178,7 +179,14 @@ public class MainActivity extends FlutterActivity {
                     .build());
             engine.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override
-                public void onStart(String token) {}
+                public void onStart(String token) {
+                    notifyProgress(token, 0);
+                }
+
+                @Override
+                public void onRangeStart(String token, int start, int end, int frame) {
+                    notifyProgress(token, start);
+                }
 
                 @Override
                 public void onDone(String token) {
@@ -263,7 +271,7 @@ public class MainActivity extends FlutterActivity {
             activeId = id;
             activeToken = token;
             offline.speak(id.longValue(), text, rate == null ? 1f : rate.floatValue(), offlineVoice,
-                    message -> notifyDart(token, message));
+                    offset -> notifyProgress(token, offset), message -> notifyDart(token, message));
             result.success(null);
             return;
         }
@@ -297,6 +305,18 @@ public class MainActivity extends FlutterActivity {
         });
     }
 
+    private void notifyProgress(String token, int offset) {
+        main.post(() -> {
+            if (speech == null || token == null || !token.equals(activeToken)
+                    || offset <= lastProgressOffset) return;
+            lastProgressOffset = offset;
+            Map<String, Object> event = new HashMap<>();
+            event.put("id", activeId);
+            event.put("offset", offset);
+            speech.invokeMethod("progress", event);
+        });
+    }
+
     private void notifyDart(String token, String message) {
         main.post(() -> {
             if (speech == null || token == null || !token.equals(activeToken)) return;
@@ -314,6 +334,7 @@ public class MainActivity extends FlutterActivity {
         speechGeneration++;
         activeId = null;
         activeToken = null;
+        lastProgressOffset = -1;
         if (engine != null && ready) engine.stop();
     }
 
