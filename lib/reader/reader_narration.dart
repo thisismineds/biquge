@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 typedef NarrationVoice = ({String id, String label, bool networkRequired});
+typedef _NarrationSegment = ({int id, int end, String text});
 
 class ReaderNarration extends ChangeNotifier {
   ReaderNarration({
@@ -29,6 +30,7 @@ class ReaderNarration extends ChangeNotifier {
   int _offset = 0;
   int _segmentEnd = 0;
   int? _utterance;
+  _NarrationSegment? _prepared;
   bool _playing = false;
   bool _background = false;
 
@@ -159,53 +161,76 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _speakNext() {
-    final text = _text!;
-    final natural = _voice == null || _voice!.startsWith('qingyue:offline-zh');
-    while (_offset < text.length) {
-      var end = math.min(_offset + (natural ? 100 : 250), text.length);
-      if (end < text.length && _isLowSurrogate(text.codeUnitAt(end))) end--;
-      _segmentEnd = _readableBoundary(text, end, natural);
-      final segment = text.substring(_offset, _segmentEnd);
-      if (segment.trim().isNotEmpty) {
-        final id = ++_nextId;
-        _utterance = id;
-        unawaited(_speak(id, segment));
-        return;
+    final current = _prepared ?? _segmentAt(_offset);
+    _prepared = null;
+    if (current != null) {
+      _segmentEnd = current.end;
+      _utterance = current.id;
+      unawaited(_sendSegment('speak', current));
+      if (_usesOfflineVoice) {
+        final next = _segmentAt(current.end);
+        if (next != null) {
+          _prepared = next;
+          unawaited(_sendSegment('prepare', next));
+        }
       }
-      _offset = _segmentEnd;
+      return;
     }
     _reset();
     notifyListeners();
     onChapterFinished();
   }
 
-  int _readableBoundary(String text, int limit, bool natural) {
-    final section = text.substring(_offset, limit);
+  bool get _usesOfflineVoice =>
+      _voice == null || _voice!.startsWith('qingyue:offline-zh');
+
+  _NarrationSegment? _segmentAt(int offset) {
+    final text = _text!;
+    final offline = _usesOfflineVoice;
+    while (offset < text.length) {
+      var limit = math.min(offset + (offline ? 100 : 250), text.length);
+      if (limit < text.length && _isLowSurrogate(text.codeUnitAt(limit))) {
+        limit--;
+      }
+      final end = _readableBoundary(text, offset, limit, offline);
+      final segment = text.substring(offset, end);
+      if (segment.trim().isNotEmpty) {
+        return (id: ++_nextId, end: end, text: segment);
+      }
+      offset = end;
+    }
+    return null;
+  }
+
+  int _readableBoundary(String text, int offset, int limit, bool natural) {
+    final section = text.substring(offset, limit);
     var sentences = 0, lastBoundary = 0;
     for (final breakPoint in _sentenceEnd.allMatches(section)) {
       lastBoundary = breakPoint.end;
       if (!natural || breakPoint[0] == '\n' || ++sentences == 3) {
-        return _offset + lastBoundary;
+        return offset + lastBoundary;
       }
     }
     // Keep neighboring sentences together so the model sees their punctuation and context.
     return limit < text.length && lastBoundary >= 40
-        ? _offset + lastBoundary
+        ? offset + lastBoundary
         : limit;
   }
 
-  Future<void> _speak(int id, String segment) async {
+  Future<void> _sendSegment(String method, _NarrationSegment segment) async {
     try {
-      await _channel.invokeMethod<void>('speak', {
-        'id': id,
-        'text': segment,
+      await _channel.invokeMethod<void>(method, {
+        'id': segment.id,
+        'text': segment.text,
         'rate': _rate,
         if (_voice != null) 'voice': _voice,
       });
     } on PlatformException catch (error) {
-      _fail(id, error.message ?? '语音引擎暂时无法朗读。');
+      if (method == 'speak') {
+        _fail(segment.id, error.message ?? '语音引擎暂时无法朗读。');
+      }
     } on MissingPluginException {
-      _fail(id, '当前设备不支持系统朗读。');
+      if (method == 'speak') _fail(segment.id, '当前设备不支持系统朗读。');
     }
   }
 
@@ -237,8 +262,9 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _endUtterance() {
-    if (_utterance == null) return;
+    if (_utterance == null && _prepared == null) return;
     _utterance = null;
+    _prepared = null;
     unawaited(_stopEngine());
   }
 

@@ -92,6 +92,26 @@ void main() {
     },
   );
 
+  test('offline playback prepares the next paragraph before finishing the current one', () async {
+    narration.voice = 'qingyue:offline-zh';
+    narration.start('甲段。\n乙段。\n丙段。');
+    final first = spoken().single;
+    final prepared = calls.singleWhere((call) => call.method == 'prepare');
+    expect(text(prepared), '乙段。\n');
+    expect(calls.indexOf(prepared), greaterThan(calls.indexOf(first)));
+
+    await event('finished', id(first));
+    expect(id(spoken().last), id(prepared));
+    expect(text(spoken().last), text(prepared));
+    expect(text(calls.where((call) => call.method == 'prepare').last), '丙段。');
+
+    final oldPreparation = calls.last;
+    narration.rate = 1.75;
+    expect(calls.where((call) => call.method == 'stop'), hasLength(1));
+    expect(id(calls.last), isNot(id(oldPreparation)));
+    expect(calls.last.arguments['rate'], 1.75);
+  });
+
   test(
     'long utterances preserve text and never split a surrogate pair',
     () async {

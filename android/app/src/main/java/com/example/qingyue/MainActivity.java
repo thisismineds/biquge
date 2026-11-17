@@ -67,6 +67,11 @@ public class MainActivity extends FlutterActivity {
                     speak(call.argument("id"), call.argument("text"), call.argument("rate"),
                             call.argument("voice"), result);
                     break;
+                case "prepare":
+                    prepare(call.argument("id"), call.argument("text"), call.argument("rate"),
+                            call.argument("voice"));
+                    result.success(null);
+                    break;
                 case "stop":
                     stopSpeech();
                     result.success(null);
@@ -224,14 +229,25 @@ public class MainActivity extends FlutterActivity {
         return voices;
     }
 
+    private static boolean validSpeech(Number id, String text, Number rate) {
+        return id != null && text != null && !text.trim().isEmpty()
+                && text.length() <= TextToSpeech.getMaxSpeechInputLength()
+                && (rate == null || (Float.isFinite(rate.floatValue()) && rate.floatValue() > 0));
+    }
+
+    private void prepare(Number id, String text, Number rate, String voiceId) {
+        OfflineNarrator.Voice voice = OfflineNarrator.Voice.select(voiceId);
+        if (voice != null && offline != null && offline.isAvailable() && validSpeech(id, text, rate)) {
+            offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice);
+        }
+    }
+
     private void speak(Number id, String text, Number rate, String voiceId, MethodChannel.Result result) {
-        if (id == null || text == null || text.trim().isEmpty()
-                || text.length() > TextToSpeech.getMaxSpeechInputLength()
-                || (rate != null && (!Float.isFinite(rate.floatValue()) || rate.floatValue() <= 0))) {
+        if (!validSpeech(id, text, rate)) {
             result.error("invalid_speech", getString(R.string.tts_invalid_speech), null);
             return;
         }
-        stopSpeech();
+        resetSpeechCallback();
         long generation = speechGeneration;
         OfflineNarrator.Voice offlineVoice = OfflineNarrator.Voice.select(voiceId);
         if (offlineVoice != null) {
@@ -242,11 +258,12 @@ public class MainActivity extends FlutterActivity {
             String token = Long.toString(generation);
             activeId = id;
             activeToken = token;
-            offline.speak(text, rate == null ? 1f : rate.floatValue(), offlineVoice,
+            offline.speak(id.longValue(), text, rate == null ? 1f : rate.floatValue(), offlineVoice,
                     message -> notifyDart(token, message));
             result.success(null);
             return;
         }
+        if (offline != null) offline.stop();
         withEngine(readyEngine -> {
             if (generation != speechGeneration) {
                 result.success(null);
@@ -289,12 +306,16 @@ public class MainActivity extends FlutterActivity {
         });
     }
 
-    private void stopSpeech() {
+    private void resetSpeechCallback() {
         speechGeneration++;
         activeId = null;
         activeToken = null;
-        if (offline != null) offline.stop();
         if (engine != null && ready) engine.stop();
+    }
+
+    private void stopSpeech() {
+        resetSpeechCallback();
+        if (offline != null) offline.stop();
     }
 
     private void installVoices(MethodChannel.Result result) {
