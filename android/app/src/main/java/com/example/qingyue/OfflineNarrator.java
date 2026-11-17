@@ -48,7 +48,8 @@ final class OfflineNarrator implements AutoCloseable {
                 "qwen-reference-rvq.json", "tokenizer.onnx", "moss_tts_prefill.onnx",
                 "moss_tts_decode_step.onnx", "moss_tts_local_fixed_sampled_frame.onnx",
                 "moss_tts_global_shared_int8.data", "moss_tts_local_fixed_sampled_frame_int8.data",
-                "moss_audio_tokenizer_decode_full.onnx", "moss_audio_tokenizer_decode_shared.data");
+                "codec_browser_onnx_meta.json", "moss_audio_tokenizer_decode_step.onnx",
+                "moss_audio_tokenizer_decode_shared.data");
 
         final String directory;
         final String[] requiredFiles;

@@ -52,6 +52,8 @@ import java.util.function.BooleanSupplier;
 /** Owns the model sessions. Used exclusively by the offline narrator's worker. */
 final class MossNarratorEngine implements AutoCloseable {
     private static final int SAMPLE_RATE = 48000;
+    // Decoding a whole utterance makes the vocoder's native working memory grow with its length.
+    private static final int CODEC_BATCH_FRAMES = 16;
     private static final float[] NO_AUDIO = new float[0];
 
     private final OrtEnvironment environment = OrtEnvironment.getEnvironment();
@@ -76,6 +78,34 @@ final class MossNarratorEngine implements AutoCloseable {
     private final int[][] voice;
     private final String[] cacheInputs;
     private final String[] cacheOutputs;
+    private final int samplesPerFrame;
+    private final List<CodecState> codecStates = new ArrayList<>();
+
+    private static final class CodecState {
+        final String input;
+        final String output;
+        final long[] shape;
+        final int size;
+        final boolean floatingPoint;
+        final int initialValue;
+
+        CodecState(String input, String output, JSONArray dimensions, boolean floatingPoint,
+                   int initialValue) throws JSONException {
+            this.input = input;
+            this.output = output;
+            this.floatingPoint = floatingPoint;
+            this.initialValue = initialValue;
+            shape = new long[dimensions.length()];
+            int elements = 1;
+            for (int i = 0; i < shape.length; i++) {
+                int dimension = dimensions.getInt(i);
+                if (dimension <= 0) throw new JSONException("Invalid MOSS codec state dimension");
+                shape[i] = dimension;
+                elements = Math.multiplyExact(elements, dimension);
+            }
+            size = elements;
+        }
+    }
 
     MossNarratorEngine(File modelDir) throws IOException, JSONException, OrtException {
         JSONObject manifest = new JSONObject(readText(modelDir, "browser_poc_manifest.json"));
@@ -107,6 +137,29 @@ final class MossNarratorEngine implements AutoCloseable {
             throw new IOException("Inconsistent MOSS decode model metadata");
         }
 
+        JSONObject codec = new JSONObject(readText(modelDir, "codec_browser_onnx_meta.json"));
+        JSONObject codecConfig = codec.getJSONObject("codec_config");
+        samplesPerFrame = codecConfig.getInt("downsample_rate");
+        if (samplesPerFrame <= 0 || codecConfig.getInt("num_quantizers") != quantizers
+                || codecConfig.getInt("sample_rate") != SAMPLE_RATE) {
+            throw new IOException("Inconsistent MOSS codec model metadata");
+        }
+        JSONObject stream = codec.getJSONObject("streaming_decode");
+        JSONArray transformers = stream.getJSONArray("transformer_offsets");
+        for (int i = 0; i < transformers.length(); i++) {
+            JSONObject state = transformers.getJSONObject(i);
+            codecStates.add(new CodecState(state.getString("input_name"),
+                    state.getString("output_name"), state.getJSONArray("shape"), false, 0));
+        }
+        JSONArray attention = stream.getJSONArray("attention_caches");
+        for (int i = 0; i < attention.length(); i++) {
+            JSONObject state = attention.getJSONObject(i);
+            addCodecState(state, "offset", "offset_shape", false, 0);
+            addCodecState(state, "cached_keys", "cache_shape", true, 0);
+            addCodecState(state, "cached_values", "cache_shape", true, 0);
+            addCodecState(state, "cached_positions", "positions_shape", false, -1);
+        }
+
         options = new OrtSession.SessionOptions();
         try {
             options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
@@ -115,7 +168,7 @@ final class MossNarratorEngine implements AutoCloseable {
             prefill = open(modelDir, "moss_tts_prefill.onnx", options);
             decode = open(modelDir, "moss_tts_decode_step.onnx", options);
             sampler = open(modelDir, "moss_tts_local_fixed_sampled_frame.onnx", options);
-            vocoder = open(modelDir, "moss_audio_tokenizer_decode_full.onnx", options);
+            vocoder = open(modelDir, "moss_audio_tokenizer_decode_step.onnx", options);
             options.registerCustomOpLibrary(OrtxPackage.getLibraryPath());
             tokenizer = open(modelDir, "tokenizer.onnx", options);
         } catch (IOException | OrtException | RuntimeException | LinkageError failure) {
@@ -172,7 +225,8 @@ final class MossNarratorEngine implements AutoCloseable {
         }
         int[] frames = new int[maxFrames * quantizers];
         int count = generateFrames(initial, rows, frames, cancelled);
-        return count == 0 || cancelled.getAsBoolean() ? NO_AUDIO : decodeAudio(frames, count);
+        return count == 0 || cancelled.getAsBoolean() ? NO_AUDIO
+                : decodeAudio(frames, count, cancelled);
     }
 
     private int generateFrames(OrtSession.Result initial, int rows, int[] frames,
@@ -240,26 +294,75 @@ final class MossNarratorEngine implements AutoCloseable {
         }
     }
 
-    private float[] decodeAudio(int[] frames, int count) throws OrtException {
-        try (OnnxTensor codes = intTensor(IntBuffer.wrap(frames, 0, count * quantizers),
-                     1, count, quantizers);
-             OnnxTensor lengths = intTensor(IntBuffer.wrap(new int[]{count}), 1)) {
-            Map<String, OnnxTensorLike> inputs = new HashMap<>();
-            inputs.put("audio_codes", codes);
-            inputs.put("audio_code_lengths", lengths);
-            try (OrtSession.Result output = vocoder.run(inputs)) {
-                float[][] channels = ((float[][][]) tensor(output, "audio").getValue())[0];
-                int length = intValues(tensor(output, "audio_lengths"))[0];
-                for (float[] channel : channels) length = Math.min(length, channel.length);
-                if (length <= 0 || channels.length == 0) return NO_AUDIO;
-                float[] mono = new float[length];
-                for (float[] channel : channels) {
-                    for (int i = 0; i < length; i++) mono[i] += channel[i];
+    private float[] decodeAudio(int[] frames, int count, BooleanSupplier cancelled)
+            throws OrtException {
+        float[] mono = new float[Math.multiplyExact(count, samplesPerFrame)];
+        List<OnnxTensor> initialStates = new ArrayList<>(codecStates.size());
+        OrtSession.Result state = null;
+        Map<String, OnnxTensorLike> inputs = new HashMap<>();
+        try {
+            for (CodecState spec : codecStates) {
+                OnnxTensor input;
+                if (spec.floatingPoint) {
+                    input = OnnxTensor.createTensor(environment, allocateFloats(spec.size),
+                            spec.shape);
+                } else {
+                    IntBuffer values = allocateInts(spec.size);
+                    for (int i = 0; i < spec.size; i++) values.put(i, spec.initialValue);
+                    input = intTensor(values, spec.shape);
                 }
-                for (int i = 0; i < length; i++) mono[i] /= channels.length;
-                return mono;
+                initialStates.add(input);
+                inputs.put(spec.input, input);
             }
+            int written = 0;
+            for (int start = 0; start < count; start += CODEC_BATCH_FRAMES) {
+                if (cancelled.getAsBoolean()) return NO_AUDIO;
+                int batch = Math.min(CODEC_BATCH_FRAMES, count - start);
+                OrtSession.Result next;
+                try (OnnxTensor codes = intTensor(
+                             IntBuffer.wrap(frames, start * quantizers, batch * quantizers),
+                             1, batch, quantizers);
+                     OnnxTensor lengths = intTensor(IntBuffer.wrap(new int[]{batch}), 1)) {
+                    inputs.put("audio_codes", codes);
+                    inputs.put("audio_code_lengths", lengths);
+                    next = vocoder.run(inputs);
+                }
+                OrtSession.Result previous = state;
+                state = next;
+                if (previous != null) previous.close();
+                for (OnnxTensor seed : initialStates) seed.close();
+                initialStates.clear();
+                for (CodecState spec : codecStates) {
+                    inputs.put(spec.input, tensor(state, spec.output));
+                }
+                int length = intValues(tensor(state, "audio_lengths"))[0];
+                float[][] channels = ((float[][][]) tensor(state, "audio").getValue())[0];
+                if (channels.length == 0 || length <= 0 || length > batch * samplesPerFrame
+                        || length > mono.length - written) {
+                    throw new IllegalStateException("Unexpected MOSS codec audio length");
+                }
+                for (float[] channel : channels) {
+                    if (channel.length < length) {
+                        throw new IllegalStateException("Incomplete MOSS codec audio");
+                    }
+                    for (int i = 0; i < length; i++) mono[written + i] += channel[i];
+                }
+                for (int i = 0; i < length; i++) mono[written + i] /= channels.length;
+                written += length;
+            }
+            if (cancelled.getAsBoolean()) return NO_AUDIO;
+            return written == mono.length ? mono : Arrays.copyOf(mono, written);
+        } finally {
+            if (state != null) state.close();
+            for (OnnxTensor seed : initialStates) seed.close();
         }
+    }
+
+    private void addCodecState(JSONObject state, String name, String shape, boolean floatingPoint,
+                               int initialValue) throws JSONException {
+        codecStates.add(new CodecState(state.getString(name + "_input_name"),
+                state.getString(name + "_output_name"), state.getJSONArray(shape),
+                floatingPoint, initialValue));
     }
 
     private OnnxTensor lastHidden(OnnxTensor source) throws OrtException {

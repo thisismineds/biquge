@@ -58,7 +58,8 @@ if ($BroadcastSource) {
         'lm/moss_tts_local_fixed_sampled_frame.onnx'           = '3baf66aac8bb52e4d7adc9204299a4947788b100efdd07af198f117a59f120a6'
         'lm/moss_tts_global_shared_int8.data'                  = 'b127207a2274826b113fd3f2c4917ef366535c3324dd0f8fe95d6355626a85bb'
         'lm/moss_tts_local_fixed_sampled_frame_int8.data'      = 'dbbdde4c10bf59e7d63087c6688ca18bad46088d5e4c8c0b7d9e858304d44aa4'
-        'codec/moss_audio_tokenizer_decode_full.onnx'          = '0fbbafe3fd4afa2a019af5c5ced204af6e2d1db044fa40f021525d2aee95b4ac'
+        'codec/codec_browser_onnx_meta.json'                   = '3e291c883bb7d11ff2fe8e964e3e495519760358859f35c951254c7741592731'
+        'codec/moss_audio_tokenizer_decode_step.onnx'          = '9527c86a29e1837edec1f74db57d5eeaadb3a715af3382703566460afed25855'
         'codec/moss_audio_tokenizer_decode_shared.data'        = 'e69d52e0f4e84ca27850557ee54face46632d3a5a16c89bd246c7c408466dcad'
         'qwen-reference-rvq.json'                             = 'c430d28ec05eaff6d24798a27ccb5933b3c7163caafbf470a0431b36272fdcd9'
     }
@@ -73,6 +74,10 @@ if ($BroadcastSource) {
     New-Item -ItemType Directory -Path $broadcastVoice -Force | Out-Null
     foreach ($component in $pack.Keys) {
         Copy-Item -LiteralPath (Join-Path $BroadcastSource $component) -Destination $broadcastVoice
+    }
+    $oldDecoder = Join-Path $broadcastVoice 'moss_audio_tokenizer_decode_full.onnx'
+    if (Test-Path -LiteralPath $oldDecoder -PathType Leaf) {
+        Remove-Item -LiteralPath $oldDecoder
     }
     @'
 The original broadcast voice uses a synthetic Qwen3-TTS VoiceDesign reference.
