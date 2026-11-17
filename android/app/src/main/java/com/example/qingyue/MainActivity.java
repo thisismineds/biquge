@@ -8,8 +8,10 @@ import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
+import android.util.Log;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -20,9 +22,11 @@ import java.util.function.Consumer;
 
 import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.embedding.engine.FlutterEngine;
+import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 
 public class MainActivity extends FlutterActivity {
+    private static MainActivity backgroundOwner;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Consumer<TextToSpeech>> waiting = new ArrayList<>();
     private MethodChannel speech;
@@ -76,10 +80,69 @@ public class MainActivity extends FlutterActivity {
                 case "installVoices":
                     installVoices(result);
                     break;
+                case "beginBackground":
+                    setBackground(call, result, true);
+                    break;
+                case "updateBackground":
+                    setBackground(call, result, false);
+                    break;
+                case "endBackground":
+                    endBackground();
+                    result.success(null);
+                    break;
                 default:
                     result.notImplemented();
             }
         });
+    }
+
+    private void setBackground(MethodCall call, MethodChannel.Result result, boolean begin) {
+        Object book = call.argument("book");
+        Object chapter = call.argument("chapter");
+        Object playing = begin ? Boolean.TRUE : call.argument("playing");
+        if (!(book instanceof String) || !(chapter instanceof String)
+                || !(playing instanceof Boolean)) {
+            result.error("invalid_background", "听书信息无效，请重新开始播放。", null);
+            return;
+        }
+        if (!begin && backgroundOwner != this) {
+            result.error("background_inactive", "后台听书已结束，请重新开始播放。", null);
+            return;
+        }
+        try {
+            if (begin && backgroundOwner != this) {
+                if (backgroundOwner != null) backgroundOwner.endBackground();
+                backgroundOwner = this;
+                NarrationService.setControls(this::onTransport);
+            }
+            NarrationService.update(getApplicationContext(), (String) book, (String) chapter,
+                    (Boolean) playing);
+            result.success(null);
+        } catch (RuntimeException failure) {
+            Log.w("QingyueNarration", "Unable to start or update playback service", failure);
+            if (!begin) onTransport("stop");
+            endBackground();
+            result.error("background_service", "无法开启后台听书，请回到阅读页重试。", null);
+        }
+    }
+
+    private void onTransport(String action) {
+        if (backgroundOwner != this || speech == null) return;
+        if (!"play".equals(action) && !"pause".equals(action) && !"stop".equals(action)) return;
+        if ("stop".equals(action)) stopSpeech();
+        speech.invokeMethod("transport", Collections.singletonMap("action",
+                "play".equals(action) ? "resume" : action));
+    }
+
+    private void endBackground() {
+        if (backgroundOwner != this) return;
+        backgroundOwner = null;
+        NarrationService.setControls(null);
+        try {
+            NarrationService.stop(getApplicationContext());
+        } catch (RuntimeException failure) {
+            Log.w("QingyueNarration", "Unable to stop playback service", failure);
+        }
     }
 
     private static Map<String, Object> voiceEntry(String id, String label, boolean networkRequired) {
@@ -291,6 +354,7 @@ public class MainActivity extends FlutterActivity {
 
     @Override
     public void cleanUpFlutterEngine(FlutterEngine flutterEngine) {
+        endBackground();
         if (speech != null) speech.setMethodCallHandler(null);
         speech = null;
         releaseEngine();

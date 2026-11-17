@@ -7,7 +7,11 @@ import 'package:flutter/services.dart';
 typedef NarrationVoice = ({String id, String label, bool networkRequired});
 
 class ReaderNarration extends ChangeNotifier {
-  ReaderNarration({required this.onChapterFinished, required this.onError});
+  ReaderNarration({
+    required this.onChapterFinished,
+    required this.onError,
+    this.onTransport,
+  });
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
   static const _channel = MethodChannel('qingyue/tts');
@@ -17,6 +21,7 @@ class ReaderNarration extends ChangeNotifier {
 
   final VoidCallback onChapterFinished;
   final ValueChanged<String> onError;
+  final ValueChanged<String>? onTransport;
 
   String? _text;
   String? _voice;
@@ -25,6 +30,7 @@ class ReaderNarration extends ChangeNotifier {
   int _segmentEnd = 0;
   int? _utterance;
   bool _playing = false;
+  bool _background = false;
 
   bool get playing => _playing;
   bool get paused => _text != null && !_playing;
@@ -69,14 +75,57 @@ class ReaderNarration extends ChangeNotifier {
 
   Future<void> installVoices() => _channel.invokeMethod<void>('installVoices');
 
-  void start(String text, {int offset = 0}) {
+  bool get backgroundActive => _background;
+
+  Future<void> beginBackground(String book, String chapter) async {
+    _claimChannel();
+    _background = true;
+    await _channel.invokeMethod<void>('beginBackground', {
+      'book': book,
+      'chapter': chapter,
+    });
+  }
+
+  void updateBackground(String book, String chapter, {required bool playing}) {
+    if (!_background) return;
+    unawaited(
+      _sendBackground('updateBackground', {
+        'book': book,
+        'chapter': chapter,
+        'playing': playing,
+      }),
+    );
+  }
+
+  void endBackground() {
+    if (!_background) return;
+    _background = false;
+    unawaited(_sendBackground('endBackground'));
+    _releaseChannel();
+  }
+
+  Future<void> _sendBackground(String method, [Object? arguments]) async {
+    try {
+      await _channel.invokeMethod<void>(method, arguments);
+    } on PlatformException {
+      // The Android service may already have stopped.
+    } on MissingPluginException {
+      // The activity may already have detached.
+    }
+  }
+
+  void _claimChannel() {
     if (_owner != this) {
       _owner?.stop();
+      _owner?.endBackground();
       _owner = this;
       _channel.setMethodCallHandler(_handleEvent);
-    } else {
-      _endUtterance();
     }
+  }
+
+  void start(String text, {int offset = 0, bool paused = false}) {
+    _claimChannel();
+    _endUtterance();
     _text = text;
     _offset = offset.clamp(0, text.length);
     if (_offset > 0 &&
@@ -84,8 +133,8 @@ class ReaderNarration extends ChangeNotifier {
         _isLowSurrogate(text.codeUnitAt(_offset))) {
       _offset--;
     }
-    _playing = true;
-    _speakNext();
+    _playing = !paused;
+    if (_playing) _speakNext();
     notifyListeners();
   }
 
@@ -147,6 +196,13 @@ class ReaderNarration extends ChangeNotifier {
 
   Future<void> _handleEvent(MethodCall call) async {
     final args = call.arguments;
+    if (call.method == 'transport') {
+      if (_background && args is Map) {
+        final action = args['action'];
+        if (action is String) onTransport?.call(action);
+      }
+      return;
+    }
     if (args is! Map || args['id'] is! int || args['id'] != _utterance) return;
     if (call.method == 'finished') {
       _utterance = null;
@@ -185,7 +241,11 @@ class ReaderNarration extends ChangeNotifier {
     _endUtterance();
     _text = null;
     _playing = false;
-    if (_owner == this) {
+    _releaseChannel();
+  }
+
+  void _releaseChannel() {
+    if (_owner == this && !_background && _text == null) {
       _owner = null;
       _channel.setMethodCallHandler(null);
     }
@@ -196,6 +256,7 @@ class ReaderNarration extends ChangeNotifier {
   @override
   void dispose() {
     _reset();
+    endBackground();
     super.dispose();
   }
 }

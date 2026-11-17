@@ -41,7 +41,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   Map<String, dynamic>? _attemptSaved;
   bool _busy = true, _chrome = true, _end = false, _downloading = false;
   bool _listenPanel = false;
-  AppLifecycleState? _lifecycle;
+  bool _startingPlayback = false, _listenOnReady = false;
+  int _listeningRun = 0;
   static const _voicePreference = 'reader.narrationVoice';
   static const _ratePreference = 'reader.narrationRate';
   final _voiceRefresh = ValueNotifier(0);
@@ -52,14 +53,17 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void initState() {
     super.initState();
-    _lifecycle = WidgetsBinding.instance.lifecycleState;
     final savedRate = store.preferences.get(_ratePreference);
     _narration =
         ReaderNarration(
             onChapterFinished: _narrationFinished,
             onError: (message) {
-              if (mounted) _notice(message);
+              if (mounted) {
+                _endListening();
+                _notice(message);
+              }
             },
+            onTransport: _listeningTransport,
           )
           ..voice = store.preferences.getString(_voicePreference)
           ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
@@ -115,7 +119,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool switchMirror = false,
     bool readAloud = false,
   }) async {
-    _narration.stop();
+    if (!readAloud) _endListening();
     final prefetchRun = ++_prefetchRun;
     final keepCurrent = switchMirror && _error == null && _text.isNotEmpty;
     _attempt = index;
@@ -169,9 +173,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       });
       if (switchMirror) _mirrorNotice('已切换接口：${store.sources.bqgHost}');
       unawaited(_prefetch(index, prefetchRun));
-      if (readAloud && _canSpeak) _narration.start(text);
+      if (readAloud && _narration.backgroundActive) {
+        unawaited(_save());
+        _narration.start(text, paused: !_listenOnReady);
+        _updateListeningNotification();
+      }
     } catch (e) {
       if (mounted) {
+        if (readAloud) _endListening();
         setState(() {
           _busy = false;
           if (keepCurrent) {
@@ -187,27 +196,83 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  bool get _canSpeak =>
-      _lifecycle == null || _lifecycle == AppLifecycleState.resumed;
-
   void _narrationFinished() {
-    if (!mounted || !_canSpeak || _busy) return;
+    if (!mounted || !_narration.backgroundActive || _busy) return;
     if (_chapter + 1 >= _chapters.length) {
+      _endListening();
       _notice('已听到最后一章');
       return;
     }
+    _listenOnReady = true;
     unawaited(_open(_chapter + 1, readAloud: true));
   }
 
-  void _toggleNarration() {
-    if (!_canSpeak) return;
+  void _updateListeningNotification() {
+    _narration.updateBackground(
+      widget.book.Name,
+      _chapters[_chapter].name,
+      playing: _busy ? _listenOnReady : _narration.playing,
+    );
+  }
+
+  void _listeningTransport(String action) {
+    if (!mounted || !_narration.backgroundActive) return;
+    switch (action) {
+      case 'pause':
+        _listenOnReady = false;
+        _narration.pause();
+      case 'resume':
+        _listenOnReady = true;
+        _narration.resume();
+      case 'stop':
+        _endListening();
+        if (_listenPanel) setState(() => _listenPanel = false);
+        return;
+      default:
+        return;
+    }
+    _updateListeningNotification();
+  }
+
+  void _endListening() {
+    _listeningRun++;
+    _startingPlayback = false;
+    _listenOnReady = false;
+    _narration.stop();
+    _narration.endBackground();
+  }
+
+  Future<void> _toggleNarration() async {
+    if (_startingPlayback) return;
     if (_narration.playing) {
-      _narration.pause();
+      _listeningTransport('pause');
     } else if (_narration.paused) {
-      _narration.resume();
+      _listeningTransport('resume');
     } else {
+      final run = ++_listeningRun;
       final offset = _pages.isEmpty ? _pendingOffset : _pages[_page].start;
-      _narration.start(_text, offset: offset);
+      _startingPlayback = true;
+      _listenOnReady = true;
+      try {
+        await _narration.beginBackground(
+          widget.book.Name,
+          _chapters[_chapter].name,
+        );
+        if (!mounted || run != _listeningRun) return;
+        _narration.start(_text, offset: offset, paused: !_listenOnReady);
+        _updateListeningNotification();
+      } catch (error) {
+        if (mounted && run == _listeningRun) {
+          _endListening();
+          _notice(
+            error is PlatformException && error.message != null
+                ? error.message!
+                : '无法启动后台听书，请重试。',
+          );
+        }
+      } finally {
+        if (run == _listeningRun) _startingPlayback = false;
+      }
     }
   }
 
@@ -306,6 +371,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _installNarrationVoices(BuildContext sheetContext) async {
+    _listeningTransport('pause');
     try {
       await _narration.installVoices();
     } catch (error) {
@@ -399,7 +465,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             IconButton(
               tooltip: '结束听书',
               onPressed: () {
-                _narration.stop();
+                _endListening();
                 setState(() => _listenPanel = false);
               },
               icon: const Icon(Icons.stop_rounded),
@@ -483,20 +549,19 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _save() async {
-    if (_text.isEmpty || _pages.isEmpty || _error != null || _busy) return;
+    if (_text.isEmpty || _error != null || _busy) return;
     final tag = BookTag(_chapter, _page, _chapters, widget.book.Name)
       ..content = _text
       ..pageOffsets = _pages.map((p) => p.end).toList();
-    await store.saveProgress(widget.book, tag, _pages[_page].start);
+    final offset = _pages.isEmpty ? _pendingOffset : _pages[_page].start;
+    await store.saveProgress(widget.book, tag, offset);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _lifecycle = state;
     if (state == AppLifecycleState.resumed) {
       _voiceRefresh.value++;
     } else {
-      _narration.pause();
       _save();
     }
   }

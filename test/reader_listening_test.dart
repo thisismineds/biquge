@@ -21,6 +21,7 @@ void main() {
       const codec = StandardMethodCodec();
       final messenger = tester.binding.defaultBinaryMessenger;
       final utterances = <Map<Object?, Object?>>[];
+      final background = <MethodCall>[];
       var stops = 0;
       var installs = 0, voiceQueries = 0;
       messenger.setMockMethodCallHandler(channel, (call) async {
@@ -41,6 +42,10 @@ void main() {
             utterances.add(call.arguments as Map<Object?, Object?>);
           case 'stop':
             stops++;
+          case 'beginBackground':
+          case 'updateBackground':
+          case 'endBackground':
+            background.add(call);
         }
         return null;
       });
@@ -106,29 +111,35 @@ void main() {
       expect(utterances.single['voice'], 'test-voice');
       expect(utterances.single['rate'], 1.75);
       final firstId = utterances.single['id'];
+      expect(background.first.method, 'beginBackground');
 
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
-      await tester.pump();
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pumpAndSettle();
-      expect(find.text('继续'), findsOneWidget);
-      expect(stops, greaterThan(0));
-      await tester.tap(find.text('继续'));
-      await tester.pumpAndSettle();
-      expect(utterances, hasLength(2));
-
-      Future<void> complete(Object? id) async {
+      Future<void> event(String method, Map<String, Object?> args) async {
         await messenger.handlePlatformMessage(
           channel.name,
-          codec.encodeMethodCall(MethodCall('finished', {'id': id})),
+          codec.encodeMethodCall(MethodCall(method, args)),
           (ByteData? _) {},
         );
-        await tester.pumpAndSettle();
+        await tester.pump();
       }
 
-      await complete(firstId);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      expect(stops, 0);
+      await event('transport', {'action': 'pause'});
+      expect(stops, 1);
+      await event('transport', {'action': 'resume'});
       expect(utterances, hasLength(2));
-      await complete(utterances.last['id']);
+      await event('finished', {'id': firstId});
+      expect(utterances, hasLength(2));
+      await event('finished', {'id': utterances.last['id']});
+      expect((utterances.last['text'] as String).trim(), '第二章接着念。');
+      expect(store.record(book)?['cur'], 1);
+      expect(
+        background.where((call) => call.method == 'beginBackground'),
+        hasLength(1),
+      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
       expect(find.text('第二章'), findsOneWidget);
       expect((utterances.last['text'] as String).trim(), '第二章接着念。');
       expect(utterances.last['voice'], 'test-voice');
@@ -136,6 +147,7 @@ void main() {
       await tester.tap(find.byTooltip('结束听书'));
       await tester.pumpAndSettle();
       expect(find.byTooltip('听书'), findsOneWidget);
+      expect(background.last.method, 'endBackground');
       expect(tester.takeException(), isNull);
     },
   );
