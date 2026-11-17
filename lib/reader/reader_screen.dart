@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app/reader_theme.dart';
 import '../entity/BookInfo.dart';
@@ -8,6 +9,7 @@ import '../entity/BookTag.dart';
 import '../entity/Chapter.dart';
 import '../storage/app_store.dart';
 import '../ui/cache_progress_button.dart';
+import 'reader_narration.dart';
 import 'reading_layout.dart';
 
 class ReaderScreen extends StatefulWidget {
@@ -38,12 +40,24 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _attemptEnd = false;
   Map<String, dynamic>? _attemptSaved;
   bool _busy = true, _chrome = true, _end = false, _downloading = false;
+  bool _listenPanel = false;
+  AppLifecycleState? _lifecycle;
+  static const _voicePreference = 'reader.narrationVoice';
+  final _voiceRefresh = ValueNotifier(0);
+  late final ReaderNarration _narration;
   AppStore get store => widget.store;
   bool get _canSwitchMirror => widget.book.sourceId == 'bqg631';
 
   @override
   void initState() {
     super.initState();
+    _lifecycle = WidgetsBinding.instance.lifecycleState;
+    _narration = ReaderNarration(
+      onChapterFinished: _narrationFinished,
+      onError: (message) {
+        if (mounted) _notice(message);
+      },
+    )..voice = store.preferences.getString(_voicePreference);
     WidgetsBinding.instance.addObserver(this);
     store.addListener(_changed);
     _initialize();
@@ -94,7 +108,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool end = false,
     Map<String, dynamic>? saved,
     bool switchMirror = false,
+    bool readAloud = false,
   }) async {
+    _narration.stop();
     final prefetchRun = ++_prefetchRun;
     final keepCurrent = switchMirror && _error == null && _text.isNotEmpty;
     _attempt = index;
@@ -148,6 +164,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       });
       if (switchMirror) _mirrorNotice('已切换接口：${store.sources.bqgHost}');
       unawaited(_prefetch(index, prefetchRun));
+      if (readAloud && _canSpeak) _narration.start(text);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -164,6 +181,192 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
     }
   }
+
+  bool get _canSpeak =>
+      _lifecycle == null || _lifecycle == AppLifecycleState.resumed;
+
+  void _narrationFinished() {
+    if (!mounted || !_canSpeak || _busy) return;
+    if (_chapter + 1 >= _chapters.length) {
+      _notice('已听到最后一章');
+      return;
+    }
+    unawaited(_open(_chapter + 1, readAloud: true));
+  }
+
+  void _toggleNarration() {
+    if (!_canSpeak) return;
+    if (_narration.playing) {
+      _narration.pause();
+    } else if (_narration.paused) {
+      _narration.resume();
+    } else {
+      final offset = _pages.isEmpty ? _pendingOffset : _pages[_page].start;
+      _narration.start(_text, offset: offset);
+    }
+  }
+
+  Future<void> _chooseNarrationVoice() async {
+    Future<List<NarrationVoice>>? voices;
+    var voiceRevision = -1;
+    final selected = await showModalBottomSheet<(String?,)>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (context) => FractionallySizedBox(
+        heightFactor: .72,
+        child: ValueListenableBuilder(
+          valueListenable: _voiceRefresh,
+          builder: (context, revision, _) {
+            if (voiceRevision != revision) {
+              voiceRevision = revision;
+              voices = _narration.voices();
+            }
+            return FutureBuilder<List<NarrationVoice>>(
+              future: voices,
+              builder: (context, snapshot) {
+                final items = snapshot.data ?? const [];
+                Widget voiceTile(
+                  String? id,
+                  String label, {
+                  bool network = false,
+                }) {
+                  final current = _narration.voice == id;
+                  return ListTile(
+                    title: Text(label),
+                    subtitle: network ? const Text('需要联网') : null,
+                    selected: current,
+                    trailing: current ? const Icon(Icons.check_rounded) : null,
+                    onTap: () => Navigator.pop(context, (id,)),
+                  );
+                }
+
+                final error = snapshot.error;
+                return SafeArea(
+                  top: false,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Text(
+                          '中文音色',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ),
+                      voiceTile(null, '自动选择'),
+                      ListTile(
+                        leading: const Icon(Icons.download_outlined),
+                        title: const Text('下载更多音色'),
+                        subtitle: const Text('打开手机的语音引擎设置'),
+                        onTap: () => _installNarrationVoices(context),
+                      ),
+                      if (snapshot.connectionState == ConnectionState.waiting)
+                        const LinearProgressIndicator(semanticsLabel: '正在读取音色')
+                      else if (items.isEmpty)
+                        ListTile(
+                          title: Text(
+                            error is PlatformException && error.message != null
+                                ? error.message!
+                                : '手机语音引擎暂未提供其他中文音色。',
+                          ),
+                        )
+                      else
+                        for (final voice in items)
+                          voiceTile(
+                            voice.id,
+                            voice.label,
+                            network: voice.networkRequired,
+                          ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      ),
+    );
+    if (!mounted || selected == null) return;
+    final voice = selected.$1;
+    _narration.voice = voice;
+    try {
+      final saved = await (voice == null
+          ? store.preferences.remove(_voicePreference)
+          : store.preferences.setString(_voicePreference, voice));
+      if (!saved && mounted) _notice('本次音色已切换，但未能保存选择。');
+    } catch (_) {
+      if (mounted) _notice('本次音色已切换，但未能保存选择。');
+    }
+  }
+
+  Future<void> _installNarrationVoices(BuildContext sheetContext) async {
+    try {
+      await _narration.installVoices();
+    } catch (error) {
+      if (!sheetContext.mounted) return;
+      await showDialog<void>(
+        context: sheetContext,
+        builder: (context) => AlertDialog(
+          title: const Text('无法打开音色下载'),
+          content: Text(
+            error is PlatformException && error.message != null
+                ? error.message!
+                : '请在手机设置中搜索「文字转语音」，查看可下载的中文音色。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Widget _listeningControls(Color ink) => ListenableBuilder(
+    listenable: _narration,
+    builder: (context, _) {
+      final playing = _narration.playing;
+      return IconTheme(
+        data: IconThemeData(color: ink),
+        child: Wrap(
+          spacing: 4,
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            TextButton.icon(
+              onPressed: _toggleNarration,
+              icon: Icon(
+                playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+              ),
+              label: Text(
+                playing
+                    ? '暂停'
+                    : _narration.paused
+                    ? '继续'
+                    : '播放',
+              ),
+            ),
+            TextButton.icon(
+              onPressed: _chooseNarrationVoice,
+              icon: const Icon(Icons.record_voice_over_outlined),
+              label: const Text('音色'),
+            ),
+            IconButton(
+              tooltip: '结束听书',
+              onPressed: () {
+                _narration.stop();
+                setState(() => _listenPanel = false);
+              },
+              icon: const Icon(Icons.stop_rounded),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 
   Future<void> _prefetch(int index, int run) async {
     final book = widget.book;
@@ -247,13 +450,21 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) _save();
+    _lifecycle = state;
+    if (state == AppLifecycleState.resumed) {
+      _voiceRefresh.value++;
+    } else {
+      _narration.pause();
+      _save();
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     store.removeListener(_changed);
+    _narration.dispose();
+    _voiceRefresh.dispose();
     _save();
     _controller?.dispose();
     super.dispose();
@@ -518,6 +729,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       ),
                     ),
                   ),
+                  if (_listenPanel) _listeningControls(ink),
                   Padding(
                     padding: EdgeInsets.symmetric(
                       horizontal: style.horizontalPadding,
@@ -538,13 +750,19 @@ class _ReaderScreenState extends State<ReaderScreen>
                           style: TextStyle(color: secondary, fontSize: 12),
                         ),
                         if (_chrome) ...[
+                          if (!_listenPanel)
+                            IconButton(
+                              tooltip: '听书',
+                              onPressed: () =>
+                                  setState(() => _listenPanel = true),
+                              icon: const Icon(Icons.headphones_outlined),
+                            ),
                           if (_canSwitchMirror)
                             IconButton(
                               tooltip: '更换章节内容',
                               onPressed: _switchChapterContent,
                               icon: const Icon(Icons.swap_horiz_rounded),
                             ),
-                          const SizedBox(width: 14),
                           CacheProgressButton(
                             active: _downloading,
                             cached: _downloadCached,

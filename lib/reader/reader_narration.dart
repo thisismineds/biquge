@@ -1,0 +1,186 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+
+typedef NarrationVoice = ({String id, String label, bool networkRequired});
+
+class ReaderNarration extends ChangeNotifier {
+  ReaderNarration({required this.onChapterFinished, required this.onError});
+
+  static const _channel = MethodChannel('qingyue/tts');
+  static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
+  static ReaderNarration? _owner;
+  static int _nextId = 0;
+
+  final VoidCallback onChapterFinished;
+  final ValueChanged<String> onError;
+
+  String? _text;
+  String? _voice;
+  int _offset = 0;
+  int _segmentEnd = 0;
+  int? _utterance;
+  bool _playing = false;
+
+  bool get playing => _playing;
+  bool get paused => _text != null && !_playing;
+
+  String? get voice => _voice;
+
+  set voice(String? value) {
+    if (_voice == value) return;
+    _voice = value;
+    if (_playing) {
+      _endUtterance();
+      _speakNext();
+    }
+    notifyListeners();
+  }
+
+  Future<List<NarrationVoice>> voices() async {
+    final raw = await _channel.invokeListMethod<Object?>('voices');
+    return [
+      for (final item in raw ?? const [])
+        if (item case {
+          'id': final String id,
+          'label': final String label,
+          'networkRequired': final bool networkRequired,
+        })
+          (id: id, label: label, networkRequired: networkRequired),
+    ];
+  }
+
+  Future<void> installVoices() => _channel.invokeMethod<void>('installVoices');
+
+  void start(String text, {int offset = 0}) {
+    if (_owner != this) {
+      _owner?.stop();
+      _owner = this;
+      _channel.setMethodCallHandler(_handleEvent);
+    } else {
+      _endUtterance();
+    }
+    _text = text;
+    _offset = offset.clamp(0, text.length);
+    if (_offset > 0 &&
+        _offset < text.length &&
+        _isLowSurrogate(text.codeUnitAt(_offset))) {
+      _offset--;
+    }
+    _playing = true;
+    _speakNext();
+    notifyListeners();
+  }
+
+  void pause() {
+    if (!_playing) return;
+    _playing = false;
+    _endUtterance();
+    notifyListeners();
+  }
+
+  void resume() {
+    if (!paused) return;
+    _playing = true;
+    _speakNext();
+    notifyListeners();
+  }
+
+  void stop() {
+    if (_text == null) return;
+    _reset();
+    notifyListeners();
+  }
+
+  void _speakNext() {
+    final text = _text!;
+    while (_offset < text.length) {
+      var end = math.min(_offset + 250, text.length);
+      if (end < text.length && _isLowSurrogate(text.codeUnitAt(end))) end--;
+      final match = _sentenceEnd.firstMatch(text.substring(_offset, end));
+      _segmentEnd = match == null ? end : _offset + match.end;
+      final segment = text.substring(_offset, _segmentEnd);
+      if (segment.trim().isNotEmpty) {
+        final id = ++_nextId;
+        _utterance = id;
+        unawaited(_speak(id, segment));
+        return;
+      }
+      _offset = _segmentEnd;
+    }
+    _reset();
+    notifyListeners();
+    onChapterFinished();
+  }
+
+  Future<void> _speak(int id, String segment) async {
+    try {
+      await _channel.invokeMethod<void>('speak', {
+        'id': id,
+        'text': segment,
+        'rate': 1.0,
+        if (_voice != null) 'voice': _voice,
+      });
+    } on PlatformException catch (error) {
+      _fail(id, error.message ?? '语音引擎暂时无法朗读。');
+    } on MissingPluginException {
+      _fail(id, '当前设备不支持系统朗读。');
+    }
+  }
+
+  Future<void> _handleEvent(MethodCall call) async {
+    final args = call.arguments;
+    if (args is! Map || args['id'] is! int || args['id'] != _utterance) return;
+    if (call.method == 'finished') {
+      _utterance = null;
+      _offset = _segmentEnd;
+      _speakNext();
+    } else if (call.method == 'error') {
+      final message = args['message'];
+      _fail(args['id'] as int, message is String ? message : '朗读中断，请重试。');
+    }
+  }
+
+  void _fail(int id, String message) {
+    if (id != _utterance) return;
+    _reset();
+    notifyListeners();
+    onError(message);
+  }
+
+  void _endUtterance() {
+    if (_utterance == null) return;
+    _utterance = null;
+    unawaited(_stopEngine());
+  }
+
+  Future<void> _stopEngine() async {
+    try {
+      await _channel.invokeMethod<void>('stop');
+    } on PlatformException {
+      // The engine may already have shut down.
+    } on MissingPluginException {
+      // The controller may run without an Android engine.
+    }
+  }
+
+  void _reset() {
+    _endUtterance();
+    _text = null;
+    _playing = false;
+    if (_owner == this) {
+      _owner = null;
+      _channel.setMethodCallHandler(null);
+    }
+  }
+
+  static bool _isLowSurrogate(int unit) => unit >= 0xdc00 && unit <= 0xdfff;
+
+  @override
+  void dispose() {
+    _reset();
+    super.dispose();
+  }
+}
