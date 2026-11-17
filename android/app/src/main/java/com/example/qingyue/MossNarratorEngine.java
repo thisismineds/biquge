@@ -165,6 +165,9 @@ final class MossNarratorEngine implements AutoCloseable {
             options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
             options.setIntraOpNumThreads(2);
             options.setInterOpNumThreads(1);
+            // We generate one utterance at a time and advance the language model one frame per step.
+            options.setSymbolicDimensionValue("batch", 1);
+            options.setSymbolicDimensionValue("step_seq", 1);
             prefill = open(modelDir, "moss_tts_prefill.onnx", options);
             decode = open(modelDir, "moss_tts_decode_step.onnx", options);
             sampler = open(modelDir, "moss_tts_local_fixed_sampled_frame.onnx", options);
