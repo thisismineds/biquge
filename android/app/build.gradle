@@ -68,9 +68,12 @@ dependencies {
 tasks.named('preBuild').configure {
     doFirst {
         def voice = new File(offlineTtsAssets, 'tts/kokoro-int8-multi-lang-v1_1')
+        def fastVoice = new File(offlineTtsAssets, 'tts/chaowen-fast')
         def requiredVoiceFiles = ['model.int8.onnx', 'voices.bin', 'tokens.txt', 'lexicon-us-en.txt', 'lexicon-zh.txt', 'phone-zh.fst', 'date-zh.fst', 'number-zh.fst', 'LICENSE']
-        if (!offlineTtsAar.isFile() || requiredVoiceFiles.any { !new File(voice, it).isFile() }) {
-            throw new GradleException('Offline library or Kokoro model is missing. Run tool/prepare_offline_voice.ps1 from the repository.')
+        def requiredFastFiles = ['model.onnx', 'tokens.txt', 'lexicon.txt', 'phone.fst', 'date.fst', 'number.fst', 'MODEL_CARD']
+        if (!offlineTtsAar.isFile() || requiredVoiceFiles.any { !new File(voice, it).isFile() }
+                || requiredFastFiles.any { !new File(fastVoice, it).isFile() }) {
+            throw new GradleException('Offline voice resources are missing. Run tool/prepare_offline_voice.ps1 from the repository.')
         }
     }
 }

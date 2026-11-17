@@ -48,9 +48,11 @@ public class MainActivity extends FlutterActivity {
                 case "voices":
                     withEngine(readyEngine -> {
                         List<Map<String, Object>> voices = new ArrayList<>();
-                        if (offline != null && offline.isAvailable()) {
+                        if (offline != null) {
                             for (OfflineNarrator.Voice voice : OfflineNarrator.Voice.values()) {
-                                voices.add(voiceEntry(voice.id, voice.name, false));
+                                if (offline.isAvailable(voice)) {
+                                    voices.add(voiceEntry(voice.id, voice.name, false));
+                                }
                             }
                         }
                         if (readyEngine != null) {
@@ -237,7 +239,7 @@ public class MainActivity extends FlutterActivity {
 
     private void prepare(Number id, String text, Number rate, String voiceId) {
         OfflineNarrator.Voice voice = OfflineNarrator.Voice.select(voiceId);
-        if (voice != null && offline != null && offline.isAvailable() && validSpeech(id, text, rate)) {
+        if (voice != null && offline != null && offline.isAvailable(voice) && validSpeech(id, text, rate)) {
             offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice);
         }
     }
@@ -251,7 +253,7 @@ public class MainActivity extends FlutterActivity {
         long generation = speechGeneration;
         OfflineNarrator.Voice offlineVoice = OfflineNarrator.Voice.select(voiceId);
         if (offlineVoice != null) {
-            if (offline == null || !offline.isAvailable()) {
+            if (offline == null || !offline.isAvailable(offlineVoice)) {
                 result.error("voice", getString(R.string.tts_offline_failed), null);
                 return;
             }

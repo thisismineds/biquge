@@ -1,3 +1,5 @@
+param([string]$Python = 'python')
+
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $target = Join-Path $repo 'android/app/offline-tts'
@@ -23,6 +25,27 @@ Get-VerifiedFile "$release/v2.0.1/$aarName" (Join-Path $target $aarName) '07e042
 Get-VerifiedFile "$release/tts-models/$modelName" (Join-Path $target $modelName) '259c9c8bc906d6078e4e0570421885dabb68b539c2f970fcbb890a58eeaf3e9c'
 Get-VerifiedFile 'https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v2.0.1/LICENSE' (Join-Path $voices 'sherpa-onnx-APACHE-LICENSE.txt') 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'
 Get-VerifiedFile 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/LICENSE' (Join-Path $voices 'onnx-runtime-MIT-LICENSE.txt') '2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c'
+
+$piper = 'https://hf-mirror.com/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/zh/zh_CN/chaowen/medium'
+$voiceName = 'zh_CN-chaowen-medium.onnx'
+$piperSource = Join-Path $target 'chaowen-source'
+$fastVoice = Join-Path $voices 'chaowen-fast'
+New-Item -ItemType Directory -Path $piperSource, $fastVoice -Force | Out-Null
+Get-VerifiedFile "$piper/$voiceName" (Join-Path $piperSource $voiceName) '83a5268616ad0aa2d3e2b67158824b5e23b24e0973473ce28859c059457b824e'
+Get-VerifiedFile "$piper/$voiceName.json" (Join-Path $piperSource "$voiceName.json") '57cf9bf947aa74a4e2ba41e5653b80564061c2f2d47525e8aa28c24817c19f75'
+Get-VerifiedFile "$piper/MODEL_CARD" (Join-Path $fastVoice 'MODEL_CARD') '4f9386b738601ccfdcca09ba34deef9b976e60930a010c7d5444716d3cfdb0ef'
+Get-VerifiedFile "$release/tts-models/lexicon-zh-g2pw.txt" (Join-Path $fastVoice 'lexicon.txt') '003e76f89fec389ec109b557f47cc315a1ac31a99091f0cc9d15949f9024416b'
+$rules = 'https://hf-mirror.com/csukuangfj/icefall-tts-aishell3-vits-low-2024-04-06/resolve/main/data'
+Get-VerifiedFile "$rules/phone.fst" (Join-Path $fastVoice 'phone.fst') '1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7'
+Get-VerifiedFile "$rules/date.fst" (Join-Path $fastVoice 'date.fst') 'eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718'
+Get-VerifiedFile "$rules/number.fst" (Join-Path $fastVoice 'number.fst') '743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd'
+if (-not (Test-Path -LiteralPath (Join-Path $fastVoice 'model.onnx') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $fastVoice 'tokens.txt') -PathType Leaf)) {
+    & $Python (Join-Path $PSScriptRoot 'prepare_chaowen.py') $piperSource $fastVoice
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Voice conversion needs Python 3 with onnx==1.23.2 and onnxruntime==1.28.0.'
+    }
+}
 
 $oldPath = $env:Path
 Push-Location $target
@@ -54,4 +77,12 @@ ONNX Runtime (MIT License): https://github.com/microsoft/onnxruntime
 The Mandarin voices use hexgrad/Kokoro-82M-v1.1-zh (Apache License 2.0).
 https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh
 Chinese voice data attribution: LongMaoData.
+
+The lightweight Mandarin voice uses the Nov 2026 Piper Chaowen model,
+adapted to Sherpa and dynamically quantized for mobile use.
+https://huggingface.co/rhasspy/piper-voices/tree/cf910fb59f1d79ab3b625a63993a108751c6c25d/zh/zh_CN/chaowen/medium
+Chaowen recordings: OHF Voice datasets (CC0).
+Base voice: Hi-Fi TTS reader 92, Cori Samuel (CC BY 4.0).
+https://www.openslr.org/109/ — https://creativecommons.org/licenses/by/4.0/
+Model details and attribution are retained in tts/chaowen-fast/MODEL_CARD.
 '@ | Set-Content -LiteralPath (Join-Path $voices 'offline-voice-attribution.txt') -Encoding UTF8
