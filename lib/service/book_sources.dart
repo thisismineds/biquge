@@ -23,7 +23,7 @@ class BookSource {
 
 /// Adapts the three sites to the existing reader's JSON models.
 class BookSources {
-  static const recommendationSources = ['bqg631', 'biquges123'];
+  static const recommendationSources = ['bqg631', 'biquges123', 'kuwo'];
   static const recommendationCategories = {
     'sort1': (label: '玄幻奇幻', catalog: 'xuanhuan', web: 'xh', webLabel: '玄幻奇幻'),
     'sort2': (label: '武侠仙侠', catalog: 'wuxia', web: 'xz', webLabel: '武侠修真'),
@@ -236,6 +236,28 @@ class BookSources {
     String sourceId = 'bqg631',
   }) async {
     if (sourceId == 'biquges123') return _webRecommendations();
+    if (sourceId == 'kuwo') {
+      final feeds = await Future.wait([
+        _kuwoRecommendations(null, 1, pageSize: 6, allowPartial: true),
+        _kuwoRecommendations(
+          null,
+          1,
+          pageSize: 15,
+          latest: true,
+          allowPartial: true,
+        ),
+      ]);
+      final featured = feeds.first.books;
+      final updates = recentFirst(feeds.last.books);
+      if (featured.isEmpty && updates.isEmpty) {
+        throw SourceException('酷我小说暂时没有可用书单。');
+      }
+      return {
+        if (featured.isNotEmpty) 'hotlist': featured.take(4).toList(),
+        if (featured.length > 4) 'toplist': featured.skip(4).toList(),
+        if (updates.isNotEmpty) 'uplist': updates,
+      };
+    }
     if (sourceId != 'bqg631') throw ArgumentError.value(sourceId, 'sourceId');
     final data = await _bqg('index', {'sort': 'index'});
     final sections = <String, List<BookInfo>>{};
@@ -253,6 +275,137 @@ class BookSources {
       sections['uplist'] = recentFirst(recent);
     }
     return sections;
+  }
+
+  Future<Map<String, String>> kuwoRecommendationCategories() async {
+    final data = await _kuwo('/categories');
+    final categories = <String, ({String label, String group})>{};
+    final labels = <String, int>{};
+    for (final group in _list(data['data']).whereType<Map<String, dynamic>>()) {
+      final type = int.tryParse('${group['freetype']}');
+      if (type != 1 && type != 2) continue;
+      final rows = group['categories'];
+      if (rows is! List) continue;
+      for (final row in rows.whereType<Map<String, dynamic>>()) {
+        final id = int.tryParse('${row['category_id']}');
+        final label = row['category_name'];
+        if (id == null || id < 1 || label is! String || label.trim().isEmpty) {
+          continue;
+        }
+        final key = 'kuwo:$type:$id';
+        if (categories.containsKey(key)) continue;
+        final name = label.trim();
+        categories[key] = (label: name, group: type == 1 ? '男生' : '女生');
+        labels.update(name, (count) => count + 1, ifAbsent: () => 1);
+      }
+    }
+    if (categories.isEmpty) throw SourceException('酷我小说暂时没有分类。');
+    return {
+      for (final entry in categories.entries)
+        entry.key: labels[entry.value.label] == 1
+            ? entry.value.label
+            : '${entry.value.label}·${entry.value.group}',
+    };
+  }
+
+  Future<RecommendationPage> _kuwoRecommendations(
+    String? category,
+    int page, {
+    int pageSize = 30,
+    bool latest = false,
+    bool allowPartial = false,
+  }) async {
+    if (page < 1) throw ArgumentError.value(page, 'page');
+    final key = category == null
+        ? null
+        : RegExp(r'^kuwo:([12]):([1-9]\d*)$').firstMatch(category);
+    if (category != null && key == null) {
+      throw ArgumentError.value(category, 'category');
+    }
+    final channels = key == null ? ['1', '2'] : [key[1]!];
+    final results = await Future.wait(
+      channels.map((channel) async {
+        final Map<String, dynamic> response;
+        final List rows;
+        try {
+          response = await _kuwo('/category/$channel', {
+            'category_id': key == null ? '0' : key[2]!,
+            'fk': 1,
+            'sk': latest ? 3 : 1,
+            'pi': page,
+            'ps': pageSize,
+          });
+          rows = _list(response['data']);
+        } on SourceException {
+          if (!allowPartial) rethrow;
+          return (books: <BookInfo>[], hasMore: false);
+        }
+        final books = <BookInfo>[];
+        for (final row in rows.whereType<Map<String, dynamic>>()) {
+          final id = int.tryParse('${row['book_id']}');
+          final title = row['title'];
+          if (id == null ||
+              id < 1 ||
+              title is! String ||
+              title.trim().isEmpty) {
+            continue;
+          }
+          final timestamp = int.tryParse('${row['new_chapter_time']}');
+          final updated =
+              timestamp != null && timestamp >= 1 && timestamp <= 253402271999
+              ? DateTime.fromMillisecondsSinceEpoch(
+                      timestamp * 1000,
+                      isUtc: true,
+                    )
+                    .add(const Duration(hours: 8))
+                    .toIso8601String()
+                    .substring(0, 19)
+                    .replaceFirst('T', ' ')
+              : '';
+          books.add(
+            BookInfo.fromJson(
+              _book(
+                'kuwo',
+                id,
+                title.trim(),
+                author: row['author_name'] is String
+                    ? row['author_name'] as String
+                    : '',
+                image: row['cover_url'] is String
+                    ? row['cover_url'] as String
+                    : '',
+                intro: row['intro'] is String ? row['intro'] as String : '',
+                category: row['category_name'] is String
+                    ? row['category_name'] as String
+                    : '',
+                status: switch ('${row['status']}') {
+                  '30' => '连载',
+                  '50' => '完结',
+                  _ => '',
+                },
+                updated: updated,
+              ),
+            ),
+          );
+        }
+        final paging = response['paging'];
+        final pages = paging is Map
+            ? int.tryParse('${paging['page_count']}')
+            : null;
+        return (books: books, hasMore: page < (pages ?? page));
+      }),
+    );
+    final seen = <int>{};
+    final longest = results
+        .map((result) => result.books.length)
+        .reduce((a, b) => a > b ? a : b);
+    final books = <BookInfo>[
+      for (var index = 0; index < longest; index++)
+        for (final result in results)
+          if (index < result.books.length && seen.add(result.books[index].Id))
+            result.books[index],
+    ];
+    return (books: books, hasMore: results.any((result) => result.hasMore));
   }
 
   Future<Map<String, List<BookInfo>>> _webRecommendations() async {
@@ -386,6 +539,13 @@ class BookSources {
     String sourceId = 'bqg631',
     int page = 1,
   }) async {
+    if (sourceId == 'kuwo') {
+      final result = await _kuwoRecommendations(category, page);
+      if (result.books.isEmpty && page == 1) {
+        throw SourceException('酷我小说暂时没有更多书籍。');
+      }
+      return result;
+    }
     if (sourceId == 'biquges123') {
       final origin = Uri.parse(source(sourceId).url);
       final path = category == null

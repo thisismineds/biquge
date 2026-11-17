@@ -169,6 +169,131 @@ void main() {
   });
 
   test(
+    'kuwo recommendations and paged categories use native channels',
+    () async {
+      final client = Dio();
+      final requests = <(String, String, int, int)>[];
+      client.httpClientAdapter = FixtureAdapter((options) async {
+        expect(options.uri.host, 'appi.kuwo.cn');
+        if (options.path.endsWith('/categories')) {
+          return jsonBody({
+            'code': 200,
+            'data': [
+              {
+                'freetype': 1,
+                'categories': [
+                  {'category_id': 20001, 'category_name': '玄幻'},
+                  {'category_id': 20059, 'category_name': '轻小说'},
+                ],
+              },
+              {
+                'freetype': '2',
+                'categories': [
+                  {'category_id': '30055', 'category_name': '轻小说'},
+                ],
+              },
+              {
+                'freetype': 3,
+                'categories': [
+                  {'category_id': 50001, 'category_name': '漫画'},
+                ],
+              },
+            ],
+          });
+        }
+        final channel = options.uri.pathSegments.last;
+        final category = options.queryParameters['category_id'] as String;
+        final page = options.queryParameters['pi'] as int;
+        final sort = options.queryParameters['sk'] as int;
+        requests.add((channel, category, page, sort));
+        return jsonBody({
+          'code': 200,
+          'data': [
+            {'book_id': 'invalid', 'title': '无效条目'},
+            {
+              'book_id': channel == '1'
+                  ? '22329826000011202'
+                  : '21293283501390004',
+              'title': '书籍$channel',
+              'category_name': '玄幻',
+              'new_chapter_time': channel == '1' ? 1794865122 : 1794883726,
+            },
+          ],
+          'paging': {'page_count': '2', 'pi': page},
+        });
+      });
+      final sources = BookSources(client: client);
+      expect(await sources.kuwoRecommendationCategories(), {
+        'kuwo:1:20001': '玄幻',
+        'kuwo:1:20059': '轻小说·男生',
+        'kuwo:2:30055': '轻小说·女生',
+      });
+      final feed = await sources.recommendations(sourceId: 'kuwo');
+      expect(feed['hotlist']!.map((book) => book.Id), [
+        22329826000011202,
+        21293283501390004,
+      ]);
+      expect(feed['uplist']!.map((book) => book.LastTime), [
+        '2026-11-17 10:48:46',
+        '2026-11-17 05:38:42',
+      ]);
+      expect(feed['uplist']!.first.sourceId, 'kuwo');
+      expect(feed['uplist']!.first.BookVote, isNull);
+      final first = await sources.recommendationCatalog(
+        'kuwo:2:30055',
+        sourceId: 'kuwo',
+      );
+      final last = await sources.recommendationCatalog(
+        'kuwo:2:30055',
+        sourceId: 'kuwo',
+        page: 2,
+      );
+      expect(first.hasMore, isTrue);
+      expect(last.hasMore, isFalse);
+      expect(last.books.single.Id, 21293283501390004);
+      expect(
+        requests,
+        containsAll([
+          ('1', '0', 1, 1),
+          ('2', '0', 1, 1),
+          ('1', '0', 1, 3),
+          ('2', '0', 1, 3),
+          ('2', '30055', 1, 1),
+          ('2', '30055', 2, 1),
+        ]),
+      );
+    },
+  );
+
+  test(
+    'kuwo can show partial homepage results but keeps catalog errors',
+    () async {
+      final client = Dio()
+        ..httpClientAdapter = FixtureAdapter((options) async {
+          if (options.path.endsWith('/2') ||
+              options.queryParameters['sk'] == 3) {
+            return jsonBody({'code': 503, 'data': []});
+          }
+          return jsonBody({
+            'code': 200,
+            'data': [
+              {'book_id': '22329826000011202', 'title': '首页可用书籍'},
+            ],
+            'paging': {'page_count': 1},
+          });
+        });
+      final sources = BookSources(client: client);
+      final feed = await sources.recommendations(sourceId: 'kuwo');
+      expect(feed['hotlist']!.single.Name, '首页可用书籍');
+      expect(feed['uplist'], isNull);
+      await expectLater(
+        sources.recommendationCatalog(null, sourceId: 'kuwo'),
+        throwsA(isA<SourceException>()),
+      );
+    },
+  );
+
+  test(
     'HTML source extracts nested titles and resolves chapter links',
     () async {
       final client = Dio();

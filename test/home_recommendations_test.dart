@@ -11,6 +11,78 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'book_sources_test.dart' show FixtureAdapter, jsonBody;
 
 void main() {
+  testWidgets('home switches to Kuwo and opens the selected native category', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    SharedPreferences.setMockInitialValues({'activeSourceId': 'biquges123'});
+    final categoryPages = <String>[];
+    final client = Dio()
+      ..httpClientAdapter = FixtureAdapter((o) async {
+        if (o.uri.host != 'appi.kuwo.cn') {
+          return jsonBody({
+            'hotlist': [
+              {'id': 1, 'title': '原书源精选'},
+            ],
+          });
+        }
+        if (o.uri.path.endsWith('/categories')) {
+          return jsonBody({
+            'code': 200,
+            'data': [
+              {
+                'freetype': 1,
+                'freetype_name': '男生',
+                'categories': [
+                  {'category_id': 20019, 'category_name': '都市'},
+                ],
+              },
+            ],
+          });
+        }
+        final category = o.uri.queryParameters['category_id'];
+        final page = o.uri.queryParameters['pi'] ?? '1';
+        final urban = category == '20019';
+        if (urban) categoryPages.add(page);
+        return jsonBody({
+          'code': 200,
+          'data': [
+            {
+              'book_id': '${urban ? '4' : '5'}${o.uri.pathSegments.last}$page',
+              'title': urban ? '都市第$page页' : '酷我推荐示例',
+              'category_name': '都市',
+              'new_chapter_time': 1794865122,
+            },
+          ],
+          'paging': {'pi': int.parse(page), 'page_count': urban ? 2 : 1},
+        });
+      });
+    final prefs = await SharedPreferences.getInstance();
+    final store = AppStore(prefs, sources: BookSources(client: client));
+    await tester.pumpWidget(ReaderApp(store: store));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('切换首页书源'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(CheckedPopupMenuItem<String>, '酷我小说'));
+    await tester.pumpAndSettle();
+    expect(prefs.getString('home.sourceId'), 'kuwo');
+    expect(store.sourceId, 'biquges123');
+    expect(find.text('酷我推荐示例'), findsWidgets);
+    expect(find.text('原书源精选'), findsNothing);
+    await tester.tap(find.byTooltip('选择酷我小说分类'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(PopupMenuItem<String>, '都市'));
+    await tester.pumpAndSettle();
+    expect(find.text('都市第1页'), findsWidgets);
+    await tester.tap(find.text('加载更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('都市第2页'), findsWidgets);
+    expect(categoryPages, ['1', '2']);
+  });
+
   testWidgets('home switches to the new source and browses its next catalog page', (
     tester,
   ) async {

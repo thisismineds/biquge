@@ -27,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final feeds = <String, Map<String, List<BookInfo>>>{};
   late String sourceId;
   Map<String, List<BookInfo>>? get sections => feeds[sourceId];
+  Future<Map<String, String>>? kuwoCategories;
   String? category;
   int loadRun = 0, sourceRevision = 0;
   bool loading = false, opening = false;
@@ -46,7 +47,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (loading) return;
     final requestedSource = sourceId;
     final run = ++loadRun;
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+      if (requestedSource == 'kuwo') {
+        kuwoCategories ??= loadKuwoCategories();
+      }
+    });
     try {
       final next = await widget.store.sources.recommendations(
         sourceId: requestedSource,
@@ -64,6 +70,14 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } finally {
       if (mounted && run == loadRun) setState(() => loading = false);
+    }
+  }
+
+  Future<Map<String, String>> loadKuwoCategories() async {
+    try {
+      return await widget.store.sources.kuwoRecommendationCategories();
+    } catch (_) {
+      return const {};
     }
   }
 
@@ -119,6 +133,55 @@ class _HomeScreenState extends State<HomeScreen> {
         allowUpdateSort: allowUpdateSort,
       ),
     ),
+  );
+
+  Widget kuwoCategoryPicker() => FutureBuilder<Map<String, String>>(
+    future: kuwoCategories,
+    builder: (context, snapshot) {
+      final categories = snapshot.data;
+      if (categories == null) return const Text('正在加载分类…');
+      if (categories.isEmpty) {
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => setState(() {
+              kuwoCategories = loadKuwoCategories();
+            }),
+            child: const Text('重新加载分类'),
+          ),
+        );
+      }
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: PopupMenuButton<String>(
+          tooltip: '选择酷我小说分类',
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('选择分类', style: Theme.of(context).textTheme.labelLarge),
+                const Icon(Icons.arrow_drop_down_rounded),
+              ],
+            ),
+          ),
+          itemBuilder: (_) => [
+            for (final entry in categories.entries)
+              PopupMenuItem(value: entry.key, child: Text(entry.value)),
+          ],
+          onSelected: (key) => browse(
+            categories[key]!,
+            const [],
+            loadCatalog: (page) => widget.store.sources.recommendationCatalog(
+              key,
+              sourceId: 'kuwo',
+              page: page,
+            ),
+            allowUpdateSort: true,
+          ),
+        ),
+      );
+    },
   );
 
   @override
@@ -205,6 +268,10 @@ class _HomeScreenState extends State<HomeScreen> {
                             onPressed: load,
                             child: const Text('重新加载'),
                           ),
+                          if (currentSource == 'kuwo') ...[
+                            const SizedBox(height: 16),
+                            kuwoCategoryPicker(),
+                          ],
                         ],
                       ),
               ),
@@ -224,23 +291,26 @@ class _HomeScreenState extends State<HomeScreen> {
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                       const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 2,
-                        children: [
-                          choice('综合', null),
-                          for (final entry
-                              in BookSources.recommendationCategories.entries)
-                            if (data.containsKey(entry.key))
-                              choice(
-                                BookSources.recommendationCategoryLabel(
+                      if (currentSource == 'kuwo')
+                        kuwoCategoryPicker()
+                      else
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 2,
+                          children: [
+                            choice('综合', null),
+                            for (final entry
+                                in BookSources.recommendationCategories.entries)
+                              if (data.containsKey(entry.key))
+                                choice(
+                                  BookSources.recommendationCategoryLabel(
+                                    entry.key,
+                                    currentSource,
+                                  ),
                                   entry.key,
-                                  currentSource,
                                 ),
-                                entry.key,
-                              ),
-                        ],
-                      ),
+                          ],
+                        ),
                       const SizedBox(height: 22),
                       if (selected == null && recent.isNotEmpty) ...[
                         sectionHeading('最近更新', () => browse('最近更新', recent)),
@@ -269,10 +339,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         if (popular.isNotEmpty) ...[
                           if (featured.isNotEmpty) ...[
                             const SizedBox(height: 24),
-                            Text(
-                              currentSource == 'biquges123' ? '经典推荐' : '强力推荐',
-                              style: Theme.of(context).textTheme.titleLarge,
-                            ),
+                            Text(switch (currentSource) {
+                              'biquges123' => '经典推荐',
+                              'kuwo' => '更多推荐',
+                              _ => '强力推荐',
+                            }, style: Theme.of(context).textTheme.titleLarge),
                             const SizedBox(height: 8),
                           ],
                           for (final book in popular) bookRow(book),
