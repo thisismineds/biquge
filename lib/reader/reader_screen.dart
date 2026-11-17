@@ -44,6 +44,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _listenPanel = false;
   bool _startingPlayback = false, _listenOnReady = false;
   int _listeningRun = 0;
+  int _followingChapterRequest = 0;
   static const _voicePreference = 'reader.narrationVoice';
   static const _ratePreference = 'reader.narrationRate';
   final _voiceRefresh = ValueNotifier(0);
@@ -180,8 +181,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       unawaited(_prefetch(index, prefetchRun));
       if (readAloud && _narration.backgroundActive) {
         unawaited(_save());
-        _narration.start(text, paused: !_listenOnReady);
+        _narration.start(
+          text,
+          paused: !_listenOnReady,
+          reuseFollowingChapter: true,
+        );
         _updateListeningNotification();
+        unawaited(_prepareFollowingChapter());
       }
     } catch (e) {
       if (mounted) {
@@ -210,6 +216,37 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     _listenOnReady = true;
     unawaited(_open(_chapter + 1, readAloud: true));
+  }
+
+  Future<void> _prepareFollowingChapter() async {
+    if (_busy ||
+        !_narration.playing ||
+        !_narration.preparesAudio ||
+        _chapter + 1 >= _chapters.length) {
+      return;
+    }
+    final request = ++_followingChapterRequest;
+    final run = _listeningRun;
+    final chapter = _chapter;
+    try {
+      final raw = await store.loadContent(
+        widget.book,
+        _chapters[chapter + 1].id,
+      );
+      if (!mounted ||
+          request != _followingChapterRequest ||
+          run != _listeningRun ||
+          chapter != _chapter ||
+          _busy ||
+          !_narration.playing ||
+          !_narration.preparesAudio) {
+        return;
+      }
+      final text = formatChapter(raw);
+      if (text.isNotEmpty) _narration.prepareFollowingChapter(text);
+    } catch (_) {
+      // Opening the chapter still retries the ordinary content load.
+    }
   }
 
   void _showNarrationPosition(int offset, {required bool segmentStarted}) {
@@ -250,6 +287,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         } else {
           _narration.resume();
         }
+        unawaited(_prepareFollowingChapter());
       case 'stop':
         _endListening();
         if (_listenPanel) setState(() => _listenPanel = false);
@@ -291,6 +329,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           paused: !_listenOnReady,
         );
         _updateListeningNotification();
+        unawaited(_prepareFollowingChapter());
       } catch (error) {
         if (mounted && run == _listeningRun) {
           _endListening();
@@ -389,7 +428,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (!mounted || selected == null) return;
     final voice = selected.$1;
-    _narration.voice = voice;
+    if (_narration.voice != voice) {
+      _narration.voice = voice;
+      unawaited(_prepareFollowingChapter());
+    }
     try {
       final saved = await (voice == null
           ? store.preferences.remove(_voicePreference)
@@ -427,7 +469,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _chooseNarrationRate(double rate) async {
+    final previous = _narration.rate;
     _narration.rate = rate;
+    if (_narration.rate != previous) unawaited(_prepareFollowingChapter());
     try {
       final saved = await store.preferences.setDouble(
         _ratePreference,

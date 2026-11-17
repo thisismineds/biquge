@@ -22,13 +22,21 @@ import ai.onnxruntime.OrtException;
 
 import org.json.JSONException;
 
+import java.io.DataInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.EnumSet;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -38,6 +46,9 @@ import kotlin.jvm.functions.Function1;
 
 final class OfflineNarrator implements AutoCloseable {
     private static final String TAG = "QingyueOfflineTts";
+    private static final int PCM_BLOCK_SAMPLES = 32768;
+    private static final Object CACHE_SETUP_LOCK = new Object();
+    private static boolean checkedSpeechCache;
 
     private enum Model {
         KOKORO("tts/kokoro-int8-multi-lang-v1_1",
@@ -95,18 +106,22 @@ final class OfflineNarrator implements AutoCloseable {
 
     private final AssetManager assets;
     private final File modelStorage;
+    private final File speechCache;
     private final EnumSet<Model> available = EnumSet.noneOf(Model.class);
     private final String failureMessage;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final LinkedBlockingDeque<Runnable> synthesisQueue = new LinkedBlockingDeque<>();
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(
-            1, 1, 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            1, 1, 0, TimeUnit.MILLISECONDS, synthesisQueue);
+    private final ExecutorService cacheReader = Executors.newSingleThreadExecutor();
 
     // The synthesizer belongs exclusively to the worker. Playback slots belong to main.
     private OfflineTts tts;
     private MossNarratorEngine broadcast;
     private Model loadedModel;
     private Segment current;
-    private Segment prepared;
+    private final Map<Long, Segment> prepared = new LinkedHashMap<>();
+    private Long lastSpokenId;
     private AudioTrack playing;
 
     private final class Segment implements Runnable {
@@ -115,6 +130,7 @@ final class OfflineNarrator implements AutoCloseable {
         final float speed;
         final Voice voice;
         volatile boolean cancelled;
+        volatile boolean cacheToDisk;
         IntConsumer progress;
         Consumer<String> completion;
         BufferedSpeech ready;
@@ -139,20 +155,22 @@ final class OfflineNarrator implements AutoCloseable {
     }
 
     private static final class BufferedSpeech {
-        final AudioTrack track;
+        final short[] pcm;
+        final File file;
         final int frames;
         final int sampleRate;
         final String failure;
 
-        BufferedSpeech(AudioTrack track, int frames, int sampleRate, String failure) {
-            this.track = track;
+        BufferedSpeech(short[] pcm, File file, int frames, int sampleRate, String failure) {
+            this.pcm = pcm;
+            this.file = file;
             this.frames = frames;
             this.sampleRate = sampleRate;
             this.failure = failure;
         }
 
         void release() {
-            if (track != null) track.release();
+            if (file != null) deleteCacheFile(file);
         }
     }
 
@@ -173,6 +191,7 @@ final class OfflineNarrator implements AutoCloseable {
     OfflineNarrator(Context context) {
         assets = context.getAssets();
         modelStorage = context.getNoBackupFilesDir();
+        speechCache = new File(context.getCacheDir(), "narration");
         failureMessage = context.getString(R.string.tts_offline_failed);
         for (Model model : Model.values()) {
             if (modelAssetsAvailable(assets, model)) available.add(model);
@@ -286,31 +305,39 @@ final class OfflineNarrator implements AutoCloseable {
     }
 
     void prepare(long id, String text, float speed, Voice voice) {
-        if (current == null || current.id == id
-                || (prepared != null && prepared.matches(id, text, speed, voice))) return;
-        discard(prepared);
-        prepared = new Segment(id, text, speed, voice);
-        prepared.retryOnPreparationFailure = true;
-        worker.execute(prepared);
+        if (lastSpokenId == null || id <= lastSpokenId || prepared.containsKey(id)
+                || (current != null && (current.speed != speed || current.voice != voice))) return;
+        Segment segment = new Segment(id, text, speed, voice);
+        segment.cacheToDisk = true;
+        segment.retryOnPreparationFailure = true;
+        prepared.put(id, segment);
+        worker.execute(segment);
     }
 
     void speak(long id, String text, float speed, Voice voice, IntConsumer progress,
                Consumer<String> completion) {
         discard(current);
         stopTrack();
-        Segment next = prepared;
-        prepared = null;
+        lastSpokenId = id;
+        Segment next = prepared.remove(id);
         if (next != null && next.matches(id, text, speed, voice)) {
             if (Log.isLoggable(TAG, Log.DEBUG)
-                    && (next.ready == null || next.ready.track != null)) {
+                    && (next.ready == null || next.ready.frames > 0)) {
                 Log.d(TAG, next.ready == null ? "Reused in-flight segment" : "Reused buffered segment");
             }
+            prepared.values().removeIf(segment -> {
+                if (segment.id > id && segment.speed == speed && segment.voice == voice) return false;
+                discard(segment);
+                return true;
+            });
             current = next;
+            current.cacheToDisk = false;
             current.progress = progress;
             current.completion = completion;
             playWhenReady(next);
         } else {
             discard(next);
+            discardPrepared();
             current = new Segment(id, text, speed, voice);
             current.progress = progress;
             current.completion = completion;
@@ -320,13 +347,12 @@ final class OfflineNarrator implements AutoCloseable {
 
     private void synthesize(Segment segment) {
         if (segment.cancelled) return;
-        AudioTrack track = null;
         try {
             float[] samples;
             int sampleRate;
             if (segment.voice == Voice.CLEAR) {
                 if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
-                    publish(segment, new BufferedSpeech(null, 0, 0, null));
+                    publish(segment, new BufferedSpeech(null, null, 0, 0, null));
                     return;
                 }
                 long started = SystemClock.elapsedRealtime();
@@ -352,7 +378,7 @@ final class OfflineNarrator implements AutoCloseable {
             if (segment.cancelled) return;
             if (samples.length == 0 || sampleRate <= 0) {
                 if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
-                    publish(segment, new BufferedSpeech(null, 0, 0, null));
+                    publish(segment, new BufferedSpeech(null, null, 0, 0, null));
                     return;
                 }
                 throw new IllegalStateException("No speech samples generated");
@@ -362,44 +388,100 @@ final class OfflineNarrator implements AutoCloseable {
                 pcm[i] = (short) Math.round(Math.max(-1f, Math.min(1f, samples[i])) * 32767f);
             }
             if (segment.cancelled) return;
-            track = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build())
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .build())
-                    .setTransferMode(AudioTrack.MODE_STATIC)
-                    .setBufferSizeInBytes(pcm.length * Short.BYTES)
-                    .build();
-            if (track.write(pcm, 0, pcm.length, AudioTrack.WRITE_BLOCKING) != pcm.length) {
-                throw new IllegalStateException("Incomplete speech audio buffer");
+            if (segment.cacheToDisk) {
+                File file = writeCache(segment, pcm);
+                if (file != null) publish(segment, new BufferedSpeech(null, file, pcm.length, sampleRate, null));
+            } else {
+                publish(segment, new BufferedSpeech(pcm, null, pcm.length, sampleRate, null));
             }
-            publish(segment, new BufferedSpeech(track, pcm.length, sampleRate, null));
-            track = null;
         } catch (IOException | JSONException | OrtException | RuntimeException | LinkageError failure) {
             if (!segment.cancelled) {
-                Log.w(TAG, "Could not synthesize or buffer audio", failure);
-                publish(segment, new BufferedSpeech(null, 0, 0, failureMessage));
+                Log.w(TAG, "Could not synthesize or cache audio", failure);
+                publish(segment, new BufferedSpeech(null, null, 0, 0, failureMessage));
             }
-        } finally {
-            if (track != null) track.release();
         }
+    }
+
+    private static void deleteCacheFile(File file) {
+        if (!file.delete() && file.exists()) Log.w(TAG, "Could not delete an audio cache file");
+    }
+
+    private void ensureSpeechCache() throws IOException {
+        if (!speechCache.isDirectory() && !speechCache.mkdirs() && !speechCache.isDirectory()) {
+            throw new IOException("Could not create speech cache directory");
+        }
+        synchronized (CACHE_SETUP_LOCK) {
+            if (checkedSpeechCache) return;
+            // No narrator from the previous process can still own these files.
+            File[] stale = speechCache.listFiles((directory, name) -> name.matches("segment-[0-9]+\\.pcm"));
+            if (stale == null) throw new IOException("Could not list speech cache files");
+            for (File file : stale) if (file.isFile()) deleteCacheFile(file);
+            checkedSpeechCache = true;
+        }
+    }
+
+    private File writeCache(Segment segment, short[] pcm) throws IOException {
+        ensureSpeechCache();
+        File file = File.createTempFile("segment-", ".pcm", speechCache);
+        boolean saved = false;
+        try {
+            try (FileOutputStream output = new FileOutputStream(file)) {
+                ByteBuffer block = ByteBuffer.allocate(PCM_BLOCK_SAMPLES * Short.BYTES)
+                        .order(ByteOrder.LITTLE_ENDIAN);
+                for (int i = 0; i < pcm.length; i += PCM_BLOCK_SAMPLES) {
+                    if (segment.cancelled) return null;
+                    int frames = Math.min(PCM_BLOCK_SAMPLES, pcm.length - i);
+                    block.asShortBuffer().put(pcm, i, frames);
+                    output.write(block.array(), 0, frames * Short.BYTES);
+                }
+            }
+            saved = true;
+            return file;
+        } finally {
+            if (!saved) deleteCacheFile(file);
+        }
+    }
+
+    private void loadCache(Segment segment, BufferedSpeech audio) {
+        cacheReader.execute(() -> {
+            try {
+                if (segment.cancelled) return;
+                if (audio.file.length() != (long) audio.frames * Short.BYTES) {
+                    throw new IOException("Missing or incomplete cached speech");
+                }
+                short[] pcm = new short[audio.frames];
+                ByteBuffer block = ByteBuffer.allocate(PCM_BLOCK_SAMPLES * Short.BYTES)
+                        .order(ByteOrder.LITTLE_ENDIAN);
+                try (DataInputStream input = new DataInputStream(new FileInputStream(audio.file))) {
+                    for (int i = 0; i < pcm.length; i += PCM_BLOCK_SAMPLES) {
+                        if (segment.cancelled) return;
+                        int frames = Math.min(PCM_BLOCK_SAMPLES, pcm.length - i);
+                        input.readFully(block.array(), 0, frames * Short.BYTES);
+                        block.asShortBuffer().get(pcm, i, frames);
+                    }
+                }
+                publish(segment, new BufferedSpeech(pcm, null, pcm.length, audio.sampleRate, null));
+            } catch (IOException | RuntimeException failure) {
+                if (!segment.cancelled) {
+                    Log.w(TAG, "Could not read cached speech", failure);
+                    publish(segment, new BufferedSpeech(null, null, 0, 0, failureMessage));
+                }
+            } finally {
+                audio.release();
+            }
+        });
     }
 
     private void publish(Segment segment, BufferedSpeech audio) {
         if (!main.post(() -> {
-            if (segment.cancelled || (segment != current && segment != prepared)) {
+            if (segment.cancelled || (segment != current && prepared.get(segment.id) != segment)) {
                 audio.release();
                 return;
             }
             segment.ready = audio;
             if (segment == current) {
                 playWhenReady(segment);
-            } else if (audio.track != null && Log.isLoggable(TAG, Log.DEBUG)) {
+            } else if (audio.frames > 0 && Log.isLoggable(TAG, Log.DEBUG)) {
                 Log.d(TAG, "Buffered next narration segment");
             }
         })) audio.release();
@@ -409,18 +491,40 @@ final class OfflineNarrator implements AutoCloseable {
         BufferedSpeech audio = segment.ready;
         if (audio == null) return;
         segment.ready = null;
-        if (audio.track == null) {
+        if (audio.file != null) {
+            loadCache(segment, audio);
+            return;
+        }
+        if (audio.pcm == null) {
             if (audio.failure != null && segment.retryOnPreparationFailure) {
                 segment.retryOnPreparationFailure = false;
-                worker.execute(segment);
+                // The core worker is already running. Retry before queued lookahead.
+                synthesisQueue.addFirst(segment);
                 return;
             }
             complete(segment, audio.failure);
             return;
         }
-        AudioTrack track = audio.track;
-        playing = track;
+        short[] pcm = audio.pcm;
+        int frameCount = pcm.length;
         try {
+            AudioTrack track = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setSampleRate(audio.sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build())
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .setBufferSizeInBytes(frameCount * Short.BYTES)
+                    .build();
+            playing = track;
+            if (track.write(pcm, 0, frameCount, AudioTrack.WRITE_BLOCKING) != frameCount) {
+                throw new IllegalStateException("Incomplete speech audio buffer");
+            }
             track.setPlaybackPositionUpdateListener(new AudioTrack.OnPlaybackPositionUpdateListener() {
                 @Override
                 public void onMarkerReached(AudioTrack ended) {
@@ -430,14 +534,14 @@ final class OfflineNarrator implements AutoCloseable {
                 @Override
                 public void onPeriodicNotification(AudioTrack ignored) {}
             }, main);
-            track.setNotificationMarkerPosition(audio.frames);
+            track.setNotificationMarkerPosition(frameCount);
             if (segment.voice == Voice.CLEAR && segment.speed != 1f) {
                 track.setPlaybackParams(new PlaybackParams().setPitch(1f).setSpeed(segment.speed));
             }
             track.play();
             segment.progress.accept(0);
             long deadline = SystemClock.uptimeMillis()
-                    + audio.frames * 1000L / audio.sampleRate + 5000;
+                    + frameCount * 1000L / audio.sampleRate + 5000;
             // Some devices miss a marker at the exact last frame. Check the actual head as a fallback.
             main.postDelayed(new Runnable() {
                 private int lastOffset;
@@ -446,13 +550,13 @@ final class OfflineNarrator implements AutoCloseable {
                 public void run() {
                     if (segment != current || playing != track) return;
                     int head = track.getPlaybackHeadPosition();
-                    if (head >= audio.frames) {
+                    if (head >= frameCount) {
                         finish(segment, track, null);
                     } else if (SystemClock.uptimeMillis() >= deadline) {
                         finish(segment, track, failureMessage);
                     } else {
                         // shortcut: Offline voices have no word times, so estimate from rendered frames.
-                        int offset = (int) ((long) head * segment.text.length() / audio.frames);
+                        int offset = (int) ((long) head * segment.text.length() / frameCount);
                         if (offset > lastOffset) {
                             lastOffset = offset;
                             segment.progress.accept(offset);
@@ -463,7 +567,7 @@ final class OfflineNarrator implements AutoCloseable {
             }, 250);
         } catch (RuntimeException failure) {
             Log.w(TAG, "Could not play speech audio", failure);
-            finish(segment, track, failureMessage);
+            finish(segment, playing, failureMessage);
         }
     }
 
@@ -471,8 +575,8 @@ final class OfflineNarrator implements AutoCloseable {
         if (segment != current) return;
         current = null;
         if (message != null) {
-            discard(prepared);
-            prepared = null;
+            lastSpokenId = null;
+            discardPrepared();
         }
         segment.completion.accept(message);
     }
@@ -493,6 +597,11 @@ final class OfflineNarrator implements AutoCloseable {
         }
     }
 
+    private void discardPrepared() {
+        for (Segment segment : prepared.values()) discard(segment);
+        prepared.clear();
+    }
+
     private void stopTrack() {
         AudioTrack track = playing;
         playing = null;
@@ -508,9 +617,9 @@ final class OfflineNarrator implements AutoCloseable {
 
     void stop() {
         discard(current);
-        discard(prepared);
+        discardPrepared();
         current = null;
-        prepared = null;
+        lastSpokenId = null;
         stopTrack();
     }
 
@@ -519,5 +628,6 @@ final class OfflineNarrator implements AutoCloseable {
         stop();
         worker.execute(this::releaseSynthesizer);
         worker.shutdown();
+        cacheReader.shutdown();
     }
 }

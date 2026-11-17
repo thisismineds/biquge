@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -17,6 +18,7 @@ class ReaderNarration extends ChangeNotifier {
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
   static const _channel = MethodChannel('qingyue/tts');
+  static const _followingChapterSegments = 5;
   static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
   static ReaderNarration? _owner;
   static int _nextId = 0;
@@ -32,12 +34,16 @@ class ReaderNarration extends ChangeNotifier {
   int _offset = 0;
   _NarrationSegment? _active;
   int? _reportedOffset;
-  _NarrationSegment? _prepared;
+  final _prepared = Queue<_NarrationSegment>();
+  final _following = <_NarrationSegment>[];
+  String? _followingText;
   bool _playing = false;
   bool _background = false;
 
   bool get playing => _playing;
   bool get paused => _text != null && !_playing;
+  bool get preparesAudio =>
+      _voice == null || _voice!.startsWith('qingyue:offline-zh');
 
   String? get voice => _voice;
 
@@ -57,10 +63,8 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _playbackSettingChanged() {
-    if (_playing) {
-      _endUtterance();
-      _speakNext();
-    }
+    _endUtterance();
+    if (_playing) _speakNext();
     notifyListeners();
   }
 
@@ -127,9 +131,23 @@ class ReaderNarration extends ChangeNotifier {
     }
   }
 
-  void start(String text, {int offset = 0, bool paused = false}) {
+  void start(
+    String text, {
+    int offset = 0,
+    bool paused = false,
+    bool reuseFollowingChapter = false,
+  }) {
     _claimChannel();
-    _endUtterance();
+    if (reuseFollowingChapter &&
+        _text == null &&
+        offset == 0 &&
+        text == _followingText) {
+      _prepared.addAll(_following);
+      _following.clear();
+      _followingText = null;
+    } else {
+      _endUtterance();
+    }
     _text = text;
     _offset = offset.clamp(0, text.length);
     if (_offset > 0 &&
@@ -157,38 +175,56 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void stop() {
-    if (_text == null) return;
+    if (_text == null && _following.isEmpty) return;
     _reset();
     notifyListeners();
   }
 
   void _speakNext() {
-    final current = _prepared ?? _segmentAt(_offset);
-    _prepared = null;
+    final chapter = _text!;
+    final current = _prepared.isNotEmpty
+        ? _prepared.removeFirst()
+        : _segmentAt(chapter, _offset);
     if (current != null) {
       _active = current;
       _reportedOffset = null;
       unawaited(_sendSegment('speak', current));
-      if (_usesOfflineVoice) {
-        final next = _segmentAt(current.end);
-        if (next != null) {
-          _prepared = next;
+      if (preparesAudio) {
+        final end = _prepared.isEmpty ? current.end : _prepared.last.end;
+        var next = _segmentAt(chapter, end);
+        while (next != null) {
+          _prepared.addLast(next);
           unawaited(_sendSegment('prepare', next));
+          next = _segmentAt(chapter, next.end);
         }
       }
       return;
     }
-    _reset();
+    // Keep the next chapter's prepared audio available for the chapter hand-off.
+    _text = null;
+    _playing = false;
+    _releaseChannel();
     notifyListeners();
     onChapterFinished();
   }
 
-  bool get _usesOfflineVoice =>
-      _voice == null || _voice!.startsWith('qingyue:offline-zh');
+  void prepareFollowingChapter(String text) {
+    if (!playing || !preparesAudio || _followingText != null || text.isEmpty) {
+      return;
+    }
+    _followingText = text;
+    var end = 0;
+    for (var i = 0; i < _followingChapterSegments; i++) {
+      final next = _segmentAt(text, end);
+      if (next == null) break;
+      end = next.end;
+      _following.add(next);
+      unawaited(_sendSegment('prepare', next));
+    }
+  }
 
-  _NarrationSegment? _segmentAt(int offset) {
-    final text = _text!;
-    final offline = _usesOfflineVoice;
+  _NarrationSegment? _segmentAt(String text, int offset) {
+    final offline = preparesAudio;
     while (offset < text.length) {
       var limit = math.min(offset + (offline ? 100 : 250), text.length);
       if (limit < text.length && _isLowSurrogate(text.codeUnitAt(limit))) {
@@ -287,10 +323,13 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _endUtterance() {
-    if (_active == null && _prepared == null) return;
+    final hadAudio =
+        _active != null || _prepared.isNotEmpty || _following.isNotEmpty;
     _active = null;
-    _prepared = null;
-    unawaited(_stopEngine());
+    _prepared.clear();
+    _following.clear();
+    _followingText = null;
+    if (hadAudio) unawaited(_stopEngine());
   }
 
   Future<void> _stopEngine() async {

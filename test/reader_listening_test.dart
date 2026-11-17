@@ -11,6 +11,75 @@ import 'package:qingyue/storage/app_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets('reader reuses the five prepared segments of the next chapter', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    const channel = MethodChannel('qingyue/tts');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    String chapterText(String title) =>
+        List.generate(7, (i) => '$title第${i + 1}段。').join('\n');
+    SharedPreferences.setMockInitialValues({
+      'reader.narrationVoice': 'qingyue:offline-zh-clear',
+      'reader.narrationRate': 2.0,
+      '42chapters': jsonEncode([
+        {'id': 51, 'name': '第一章', 'hasContent': 2},
+        {'id': 52, 'name': '第二章', 'hasContent': 2},
+        {'id': 53, 'name': '第三章', 'hasContent': 2},
+      ]),
+      '51': '第一章有声音。',
+      '52': chapterText('第二章'),
+      '53': chapterText('第三章'),
+    });
+    final store = AppStore(await SharedPreferences.getInstance());
+    final book = BookInfo.id(42, '下一章准备测试');
+    await tester.pumpWidget(
+      ReaderApp(
+        store: store,
+        home: ReaderScreen(store: store, book: book),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('听书'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('播放'));
+    await tester.pumpAndSettle();
+
+    Iterable<MethodCall> spoken() => calls.where((c) => c.method == 'speak');
+    List<MethodCall> prepared(String chapter) => calls
+        .where(
+          (c) => c.method == 'prepare' && c.arguments['text'].contains(chapter),
+        )
+        .toList();
+    final first = spoken().single;
+    final following = prepared('第二章');
+    expect(following, hasLength(5));
+    expect(prepared('第三章'), isEmpty);
+    await messenger.handlePlatformMessage(
+      channel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('finished', {'id': first.arguments['id']}),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+    expect(spoken(), hasLength(2));
+    expect(spoken().last.arguments['id'], following.first.arguments['id']);
+    expect(prepared('第三章'), hasLength(5));
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'reader follows background audio and resumes from a browsed page',
     (tester) async {

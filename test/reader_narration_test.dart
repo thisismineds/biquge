@@ -120,25 +120,66 @@ void main() {
     },
   );
 
-  test('offline playback prepares the next paragraph before finishing the current one', () async {
-    narration.voice = 'qingyue:offline-zh';
-    narration.start('甲段。\n乙段。\n丙段。');
-    final first = spoken().single;
-    final prepared = calls.singleWhere((call) => call.method == 'prepare');
-    expect(text(prepared), '乙段。\n');
-    expect(calls.indexOf(prepared), greaterThan(calls.indexOf(first)));
+  test(
+    'offline playback prepares the rest of the chapter immediately',
+    () async {
+      narration.voice = 'qingyue:offline-zh';
+      narration.start('甲段。\n乙段。\n丙段。');
+      final first = spoken().single;
+      final allPrepared = calls
+          .where((call) => call.method == 'prepare')
+          .toList();
+      expect(allPrepared.map(text), ['乙段。\n', '丙段。']);
+      final prepared = allPrepared.first;
+      expect(text(prepared), '乙段。\n');
+      expect(calls.indexOf(prepared), greaterThan(calls.indexOf(first)));
 
-    await event('finished', id(first));
-    expect(id(spoken().last), id(prepared));
-    expect(text(spoken().last), text(prepared));
-    expect(text(calls.where((call) => call.method == 'prepare').last), '丙段。');
+      await event('finished', id(first));
+      expect(id(spoken().last), id(prepared));
+      expect(text(spoken().last), text(prepared));
+      expect(text(calls.where((call) => call.method == 'prepare').last), '丙段。');
 
-    final oldPreparation = calls.last;
-    narration.rate = 1.75;
-    expect(calls.where((call) => call.method == 'stop'), hasLength(1));
-    expect(id(calls.last), isNot(id(oldPreparation)));
-    expect(calls.last.arguments['rate'], 1.75);
-  });
+      final oldPreparation = calls.last;
+      narration.rate = 1.75;
+      expect(calls.where((call) => call.method == 'stop'), hasLength(1));
+      expect(id(calls.last), isNot(id(oldPreparation)));
+      expect(calls.last.arguments['rate'], 1.75);
+    },
+  );
+
+  test(
+    'prepares only five in the following chapter and reuses their IDs',
+    () async {
+      narration.voice = 'qingyue:offline-zh';
+      final firstChapter = List.generate(7, (i) => '上章第$i段。');
+      final nextChapter = List.generate(7, (i) => '下章第$i段。');
+      narration.start(firstChapter.join('\n'));
+      narration.prepareFollowingChapter(nextChapter.join('\n'));
+      final queued = calls.where((call) => call.method == 'prepare').toList();
+      expect(queued.map((call) => text(call).trim()), [
+        ...firstChapter.skip(1),
+        ...nextChapter.take(5),
+      ]);
+      final nextId = id(queued[firstChapter.length - 1]);
+      for (var i = 0; i < firstChapter.length; i++) {
+        expect(text(spoken().last).trim(), firstChapter[i]);
+        await event('finished', id(spoken().last));
+      }
+      expect(chaptersFinished, 1);
+      expect(calls.where((call) => call.method == 'stop'), isEmpty);
+
+      narration.start(nextChapter.join('\n'), reuseFollowingChapter: true);
+      expect(id(spoken().last), nextId);
+      expect(text(spoken().last).trim(), nextChapter.first);
+      expect(
+        calls
+            .where((call) => call.method == 'prepare')
+            .skip(queued.length)
+            .map((call) => text(call).trim()),
+        nextChapter.skip(5),
+      );
+    },
+  );
 
   test(
     'long utterances preserve text and never split a surrogate pair',
