@@ -54,7 +54,8 @@ final class OfflineNarrator implements AutoCloseable {
         FIRST("qingyue:offline-zh", "清阅普通话男声1", Model.KOKORO, 58),
         SECOND("qingyue:offline-zh-2", "清阅普通话男声2", Model.KOKORO, 95),
         THIRD("qingyue:offline-zh-3", "清阅普通话女声", Model.KOKORO, 3),
-        CHAOWEN("qingyue:offline-zh-chaowen", "超文 · 轻量普通话男声", Model.CHAOWEN, 0);
+        CHAOWEN("qingyue:offline-zh-chaowen", "超文 · 轻量普通话男声", Model.CHAOWEN, 0),
+        CLEAR("qingyue:offline-zh-clear", "清朗播音 · 调校男声", Model.CHAOWEN, 0);
 
         final String id;
         final String name;
@@ -274,6 +275,7 @@ final class OfflineNarrator implements AutoCloseable {
                 }
                 throw new IllegalStateException("No speech samples generated");
             }
+            if (segment.voice == Voice.CLEAR) NarrationEqualizer.apply(samples, sampleRate);
             short[] pcm = new short[samples.length];
             for (int i = 0; i < samples.length; i++) {
                 pcm[i] = (short) Math.round(Math.max(-1f, Math.min(1f, samples[i])) * 32767f);
