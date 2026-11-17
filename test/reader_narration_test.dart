@@ -117,4 +117,33 @@ void main() {
     expect(narration.playing, isFalse);
     expect(chaptersFinished, 0);
   });
+
+  test(
+    'changing speed retains the sentence and continues at the new rate',
+    () async {
+      narration.start('第一句。第二句。');
+      final original = spoken().single;
+      expect(original.arguments['rate'], 1.0);
+
+      narration.rate = 2.5;
+      final updated = spoken().last;
+      expect(calls[calls.length - 2].method, 'stop');
+      expect(id(updated), isNot(id(original)));
+      expect(text(updated), text(original));
+      expect(updated.arguments['rate'], 2.5);
+      await event('finished', id(original));
+      expect(spoken(), hasLength(2));
+
+      await event('finished', id(updated));
+      expect(text(spoken().last), '第二句。');
+      expect(spoken().last.arguments['rate'], 2.5);
+
+      narration.pause();
+      narration.rate = double.nan;
+      expect(spoken(), hasLength(3));
+      narration.resume();
+      expect(text(spoken().last), '第二句。');
+      expect(spoken().last.arguments['rate'], 1.0);
+    },
+  );
 }

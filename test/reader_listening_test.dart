@@ -13,6 +13,10 @@ void main() {
   testWidgets(
     'reader remembers a voice and plays through the chapter boundary',
     (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       const channel = MethodChannel('qingyue/tts');
       const codec = StandardMethodCodec();
       final messenger = tester.binding.defaultBinaryMessenger;
@@ -77,10 +81,30 @@ void main() {
       expect(prefs.getString('reader.narrationVoice'), 'test-voice');
       expect(utterances, isEmpty);
 
+      await tester.tap(find.byTooltip('朗读倍速'));
+      await tester.pumpAndSettle();
+      for (final label in [
+        'x1.25',
+        'x1.50',
+        'x1.75',
+        'x2.00',
+        'x2.50',
+        'x3.00',
+      ]) {
+        expect(find.text(label), findsOneWidget);
+      }
+      await tester.tap(
+        find.widgetWithText(CheckedPopupMenuItem<double>, 'x1.75'),
+      );
+      await tester.pumpAndSettle();
+      expect(prefs.getDouble('reader.narrationRate'), 1.75);
+      expect(find.text('x1.75'), findsOneWidget);
+
       await tester.tap(find.text('播放'));
       await tester.pumpAndSettle();
       expect((utterances.single['text'] as String).trim(), '第一章有声音。');
       expect(utterances.single['voice'], 'test-voice');
+      expect(utterances.single['rate'], 1.75);
       final firstId = utterances.single['id'];
 
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
@@ -108,6 +132,7 @@ void main() {
       expect(find.text('第二章'), findsOneWidget);
       expect((utterances.last['text'] as String).trim(), '第二章接着念。');
       expect(utterances.last['voice'], 'test-voice');
+      expect(utterances.last['rate'], 1.75);
       await tester.tap(find.byTooltip('结束听书'));
       await tester.pumpAndSettle();
       expect(find.byTooltip('听书'), findsOneWidget);

@@ -6,4 +6,6 @@
     <string name="tts_invalid_speech">本段朗读参数无效。</string>
     <string name="tts_install_unavailable">手机没有可打开的语音下载页面，请在系统设置中搜索“文字转语音”，检查是否安装了中文语音引擎。</string>
     <string name="tts_voice_label">%1$s · %2$s</string>
+    <string name="tts_offline_voice">清阅普通话 %1$d（离线）</string>
+    <string name="tts_offline_failed">离线音色暂时无法朗读这段文字，请重试或切换音色。</string>
 </resources>

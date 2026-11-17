@@ -9,11 +9,15 @@ if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
 }
 def debugKeystore = System.getenv('QINGYUE_DEBUG_KEYSTORE')
+def offlineTtsDir = file('offline-tts')
+def offlineTtsAar = new File(offlineTtsDir, 'sherpa-onnx-static-link-onnxruntime-2.0.1.aar')
+def offlineTtsAssets = new File(offlineTtsDir, 'aishell-assets')
 
 android {
     namespace 'com.example.qingyue'
     compileSdk flutter.compileSdkVersion
     ndkVersion flutter.ndkVersion
+    sourceSets.main.assets.srcDir(offlineTtsAssets)
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -45,12 +49,28 @@ android {
     }
     buildTypes {
         release {
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // Test upgrades must explicitly opt into the existing debug identity.
             if (debugKeystore) {
                 signingConfig signingConfigs.debug
             } else if (keystoreProperties['storeFile']) {
                 signingConfig signingConfigs.release
             }
+        }
+    }
+}
+
+dependencies {
+    implementation files(offlineTtsAar)
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.4.0'
+}
+
+tasks.named('preBuild').configure {
+    doFirst {
+        def voice = new File(offlineTtsAssets, 'tts/vits-icefall-zh-aishell3')
+        def requiredVoiceFiles = ['model.onnx', 'lexicon.txt', 'tokens.txt']
+        if (!offlineTtsAar.isFile() || requiredVoiceFiles.any { !new File(voice, it).isFile() }) {
+            throw new GradleException('Offline voice files are missing. Run tool/prepare_offline_voice.ps1 from the repository.')
         }
     }
 }

@@ -26,6 +26,7 @@ public class MainActivity extends FlutterActivity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Consumer<TextToSpeech>> waiting = new ArrayList<>();
     private MethodChannel speech;
+    private OfflineNarrator offline;
     private TextToSpeech engine;
     private boolean ready;
     private long engineGeneration;
@@ -36,24 +37,30 @@ public class MainActivity extends FlutterActivity {
     @Override
     public void configureFlutterEngine(FlutterEngine flutterEngine) {
         super.configureFlutterEngine(flutterEngine);
+        offline = new OfflineNarrator(getApplicationContext());
         speech = new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), "qingyue/tts");
         speech.setMethodCallHandler((call, result) -> {
             switch (call.method) {
                 case "voices":
                     withEngine(readyEngine -> {
-                        if (readyEngine == null) {
+                        List<Map<String, Object>> voices = new ArrayList<>();
+                        if (offline != null && offline.isAvailable()) {
+                            for (OfflineNarrator.Voice voice : OfflineNarrator.Voice.values()) {
+                                voices.add(voiceEntry(voice.id,
+                                        getString(R.string.tts_offline_voice, voice.ordinal() + 1),
+                                        false));
+                            }
+                        }
+                        if (readyEngine == null && voices.isEmpty()) {
                             result.error("engine", getString(R.string.tts_engine_unavailable), null);
                             return;
                         }
-                        List<Map<String, Object>> voices = new ArrayList<>();
-                        for (Voice voice : chineseVoices(readyEngine)) {
-                            Map<String, Object> entry = new HashMap<>();
-                            entry.put("id", voice.getName());
-                            entry.put("label", getString(R.string.tts_voice_label,
-                                    voice.getLocale().getDisplayName(Locale.SIMPLIFIED_CHINESE),
-                                    voice.getName()));
-                            entry.put("networkRequired", voice.isNetworkConnectionRequired());
-                            voices.add(entry);
+                        if (readyEngine != null) {
+                            for (Voice voice : chineseVoices(readyEngine)) {
+                                voices.add(voiceEntry(voice.getName(), getString(R.string.tts_voice_label,
+                                        voice.getLocale().getDisplayName(Locale.SIMPLIFIED_CHINESE),
+                                        voice.getName()), voice.isNetworkConnectionRequired()));
+                            }
                         }
                         result.success(voices);
                     });
@@ -73,6 +80,14 @@ public class MainActivity extends FlutterActivity {
                     result.notImplemented();
             }
         });
+    }
+
+    private static Map<String, Object> voiceEntry(String id, String label, boolean networkRequired) {
+        Map<String, Object> entry = new HashMap<>();
+        entry.put("id", id);
+        entry.put("label", label);
+        entry.put("networkRequired", networkRequired);
+        return entry;
     }
 
     private void withEngine(Consumer<TextToSpeech> action) {
@@ -159,7 +174,23 @@ public class MainActivity extends FlutterActivity {
             result.error("invalid_speech", getString(R.string.tts_invalid_speech), null);
             return;
         }
-        long generation = ++speechGeneration;
+        stopSpeech();
+        long generation = speechGeneration;
+        OfflineNarrator.Voice offlineVoice = OfflineNarrator.Voice.select(voiceId);
+        if (offlineVoice != null
+                && (voiceId != null || (offline != null && offline.isAvailable()))) {
+            if (offline == null || !offline.isAvailable()) {
+                result.error("voice", getString(R.string.tts_offline_failed), null);
+                return;
+            }
+            String token = Long.toString(generation);
+            activeId = id;
+            activeToken = token;
+            offline.speak(text, rate == null ? 1f : rate.floatValue(), offlineVoice,
+                    message -> notifyDart(token, message));
+            result.success(null);
+            return;
+        }
         withEngine(readyEngine -> {
             if (generation != speechGeneration) {
                 result.success(null);
@@ -217,6 +248,7 @@ public class MainActivity extends FlutterActivity {
         speechGeneration++;
         activeId = null;
         activeToken = null;
+        if (offline != null) offline.stop();
         if (engine != null && ready) engine.stop();
     }
 
@@ -262,6 +294,8 @@ public class MainActivity extends FlutterActivity {
         if (speech != null) speech.setMethodCallHandler(null);
         speech = null;
         releaseEngine();
+        if (offline != null) offline.close();
+        offline = null;
         super.cleanUpFlutterEngine(flutterEngine);
     }
 }

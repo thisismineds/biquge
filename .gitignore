@@ -181,6 +181,7 @@ android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 ios/Flutter/ephemeral/
 .impeccable/review/
 .superpowers/
+android/app/offline-tts/
 .packages
 build/
 # If you're building an application, you may want to check-in your pubspec.lock

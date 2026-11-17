@@ -43,6 +43,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _listenPanel = false;
   AppLifecycleState? _lifecycle;
   static const _voicePreference = 'reader.narrationVoice';
+  static const _ratePreference = 'reader.narrationRate';
   final _voiceRefresh = ValueNotifier(0);
   late final ReaderNarration _narration;
   AppStore get store => widget.store;
@@ -52,12 +53,16 @@ class _ReaderScreenState extends State<ReaderScreen>
   void initState() {
     super.initState();
     _lifecycle = WidgetsBinding.instance.lifecycleState;
-    _narration = ReaderNarration(
-      onChapterFinished: _narrationFinished,
-      onError: (message) {
-        if (mounted) _notice(message);
-      },
-    )..voice = store.preferences.getString(_voicePreference);
+    final savedRate = store.preferences.get(_ratePreference);
+    _narration =
+        ReaderNarration(
+            onChapterFinished: _narrationFinished,
+            onError: (message) {
+              if (mounted) _notice(message);
+            },
+          )
+          ..voice = store.preferences.getString(_voicePreference)
+          ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
     WidgetsBinding.instance.addObserver(this);
     store.addListener(_changed);
     _initialize();
@@ -325,6 +330,21 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
+  Future<void> _chooseNarrationRate(double rate) async {
+    _narration.rate = rate;
+    try {
+      final saved = await store.preferences.setDouble(
+        _ratePreference,
+        _narration.rate,
+      );
+      if (!saved && mounted) _notice('本次倍速已切换，但未能保存选择。');
+    } catch (_) {
+      if (mounted) _notice('本次倍速已切换，但未能保存选择。');
+    }
+  }
+
+  String _rateLabel(double rate) => 'x${rate.toStringAsFixed(2)}';
+
   Widget _listeningControls(Color ink) => ListenableBuilder(
     listenable: _narration,
     builder: (context, _) {
@@ -353,6 +373,28 @@ class _ReaderScreenState extends State<ReaderScreen>
               onPressed: _chooseNarrationVoice,
               icon: const Icon(Icons.record_voice_over_outlined),
               label: const Text('音色'),
+            ),
+            PopupMenuButton<double>(
+              tooltip: '朗读倍速',
+              initialValue: _narration.rate,
+              onSelected: _chooseNarrationRate,
+              itemBuilder: (context) => [
+                for (final rate in ReaderNarration.playbackRates)
+                  CheckedPopupMenuItem(
+                    value: rate,
+                    checked: rate == _narration.rate,
+                    child: Text(_rateLabel(rate)),
+                  ),
+              ],
+              child: Container(
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Center(
+                  widthFactor: 1,
+                  heightFactor: 1,
+                  child: Text(_rateLabel(_narration.rate)),
+                ),
+              ),
             ),
             IconButton(
               tooltip: '结束听书',

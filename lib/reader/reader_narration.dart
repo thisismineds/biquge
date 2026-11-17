@@ -9,6 +9,7 @@ typedef NarrationVoice = ({String id, String label, bool networkRequired});
 class ReaderNarration extends ChangeNotifier {
   ReaderNarration({required this.onChapterFinished, required this.onError});
 
+  static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
   static const _channel = MethodChannel('qingyue/tts');
   static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
   static ReaderNarration? _owner;
@@ -19,6 +20,7 @@ class ReaderNarration extends ChangeNotifier {
 
   String? _text;
   String? _voice;
+  double _rate = 1.0;
   int _offset = 0;
   int _segmentEnd = 0;
   int? _utterance;
@@ -32,6 +34,19 @@ class ReaderNarration extends ChangeNotifier {
   set voice(String? value) {
     if (_voice == value) return;
     _voice = value;
+    _playbackSettingChanged();
+  }
+
+  double get rate => _rate;
+
+  set rate(double value) {
+    final next = playbackRates.contains(value) ? value : 1.0;
+    if (_rate == next) return;
+    _rate = next;
+    _playbackSettingChanged();
+  }
+
+  void _playbackSettingChanged() {
     if (_playing) {
       _endUtterance();
       _speakNext();
@@ -120,7 +135,7 @@ class ReaderNarration extends ChangeNotifier {
       await _channel.invokeMethod<void>('speak', {
         'id': id,
         'text': segment,
-        'rate': 1.0,
+        'rate': _rate,
         if (_voice != null) 'voice': _voice,
       });
     } on PlatformException catch (error) {
