@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qingyue/entity/BookInfo.dart';
 import 'package:qingyue/main.dart';
+import 'package:qingyue/main.dart' as app show main;
 import 'package:qingyue/reader/reader_screen.dart';
 import 'package:qingyue/reader/reading_layout.dart';
 import 'package:qingyue/storage/app_store.dart';
@@ -13,6 +14,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 const _computerAddresses = ['http://192.168.1.20:8767'];
 
 void main() {
+  testWidgets('app startup shares saved PC addresses with the system engine', (
+    tester,
+  ) async {
+    const channel = MethodChannel('qingyue/tts');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      throw PlatformException(code: 'unavailable');
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    SharedPreferences.setMockInitialValues({
+      'reader.narrationComputerAddresses': _computerAddresses,
+    });
+
+    await app.main();
+    await tester.pumpAndSettle();
+
+    expect(calls.map((call) => call.method), ['setSystemSpeechServers']);
+    expect(calls.single.arguments['computerAddresses'], _computerAddresses);
+  });
+
   testWidgets(
     'reader saves multiple PC addresses and uses them for listening',
     (tester) async {
@@ -74,6 +97,10 @@ void main() {
         prefs.getStringList('reader.narrationComputerAddresses'),
         addresses,
       );
+      Iterable<dynamic> systemAddresses() => calls
+          .where((call) => call.method == 'setSystemSpeechServers')
+          .map((call) => call.arguments['computerAddresses']);
+      expect(systemAddresses(), [addresses]);
       await tester.pumpWidget(const SizedBox());
       await openListening();
       await tester.tap(find.text('播放'));
@@ -94,8 +121,12 @@ void main() {
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(prefs.getStringList('reader.narrationComputerAddresses'), isEmpty);
+      expect(systemAddresses(), [addresses, <String>[]]);
       expect(calls.where((call) => call.method == 'speak'), hasLength(1));
-      expect(calls.last.method, 'endBackground');
+      expect(
+        calls.where((call) => call.method == 'endBackground'),
+        hasLength(1),
+      );
       expect(find.text('播放'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     },

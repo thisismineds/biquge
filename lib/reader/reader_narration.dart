@@ -16,11 +16,26 @@ class ReaderNarration extends ChangeNotifier {
   });
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+  static const computerAddressesPreference =
+      'reader.narrationComputerAddresses';
   static const _channel = MethodChannel('qingyue/tts');
   static const _followingChapterSegments = 5;
   static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
   static ReaderNarration? _owner;
   static int _nextId = 0;
+
+  static Future<bool> syncSystemSpeechServers(List<String> addresses) async {
+    try {
+      await _channel.invokeMethod<void>('setSystemSpeechServers', {
+        'computerAddresses': addresses,
+      });
+      return true;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
 
   final VoidCallback onChapterFinished;
   final ValueChanged<String> onError;

@@ -42,6 +42,16 @@ public class MainActivity extends FlutterActivity {
                             ComputerSpeech.addresses(call.argument("computerAddresses")));
                     result.success(null);
                     break;
+                case "setSystemSpeechServers":
+                    Object addresses = call.argument("computerAddresses");
+                    if (!(addresses instanceof List<?>)) {
+                        result.error("invalid_computer_addresses",
+                                getString(R.string.tts_computer_address), null);
+                        break;
+                    }
+                    SystemSpeechService.saveServers(this, (List<?>) addresses);
+                    result.success(null);
+                    break;
                 case "stop":
                     stopSpeech();
                     result.success(null);
