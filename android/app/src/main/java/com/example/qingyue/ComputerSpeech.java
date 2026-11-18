@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 
 final class ComputerSpeech {
     static final int SAMPLE_RATE = 48000;
@@ -26,6 +27,11 @@ final class ComputerSpeech {
     private static final int MAX_TEXT_CHARACTERS = 100;
     private static final int HEALTH_TIMEOUT_MS = 650;
     private static final int MAX_HEALTH_BYTES = 4096;
+    private static final Pattern DOTS_BEFORE_PUNCTUATION =
+            Pattern.compile("·{3,}(?=[\\s　]*[，。！？、；：,.!?;:…])");
+    private static final Pattern DOTS_AT_SENTENCE_END =
+            Pattern.compile("·{3,}(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
+    private static final Pattern MIDDLE_DOT_PAUSE = Pattern.compile("·{3,}");
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -64,7 +70,8 @@ final class ComputerSpeech {
         if (lastSuccessful != null && candidates.remove(lastSuccessful)) {
             candidates.add(0, lastSuccessful);
         }
-        byte[] body = new JSONObject().put("text", text).toString().getBytes(StandardCharsets.UTF_8);
+        byte[] body = new JSONObject().put("text", synthesisText(text))
+                .toString().getBytes(StandardCharsets.UTF_8);
         IOException lastFailure = null;
         for (URI address : candidates) {
             if (cancelled.getAsBoolean()) return null;
@@ -79,6 +86,13 @@ final class ComputerSpeech {
             }
         }
         throw new IOException("No configured computer speech server returned audio", lastFailure);
+    }
+
+    private static String synthesisText(String text) {
+        // Repeated middle dots can make the speech model generate a long noise tail.
+        String spoken = DOTS_BEFORE_PUNCTUATION.matcher(text).replaceAll("");
+        spoken = DOTS_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
+        return MIDDLE_DOT_PAUSE.matcher(spoken).replaceAll("，");
     }
 
     private static HttpURLConnection connect(URI address, String path, int connectTimeout,
