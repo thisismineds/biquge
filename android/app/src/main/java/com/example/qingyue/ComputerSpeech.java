@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class ComputerSpeech {
@@ -36,6 +37,9 @@ final class ComputerSpeech {
     private static final Pattern PAUSE_AT_SENTENCE_END = Pattern.compile(RISKY_PAUSE + SENTENCE_END);
     private static final Pattern MID_SENTENCE_PAUSE = Pattern.compile(RISKY_PAUSE);
     private static final Pattern TERMINAL_DOT_OR_COLON = Pattern.compile("[.．:：]++" + SENTENCE_END);
+    private static final int MIN_SHORT_LINE_RETRY_SECONDS = 4;
+    private static final Pattern SHORT_LINE_WITH_STOP = Pattern.compile(
+            "\\A([\\s　]*([\u3400-\u4dbf\u4e00-\u9fff]{1,12}))。(?=[\\s　]*\\z)");
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -74,8 +78,8 @@ final class ComputerSpeech {
         if (lastSuccessful != null && candidates.remove(lastSuccessful)) {
             candidates.add(0, lastSuccessful);
         }
-        byte[] body = new JSONObject().put("text", synthesisText(text))
-                .toString().getBytes(StandardCharsets.UTF_8);
+        String spoken = synthesisText(text);
+        byte[] body = synthesisBody(spoken);
         IOException lastFailure = null;
         for (URI address : candidates) {
             if (cancelled.getAsBoolean()) return null;
@@ -84,7 +88,7 @@ final class ComputerSpeech {
                 if (cancelled.getAsBoolean()) return null;
                 short[] pcm = synthesize(address, body);
                 lastSuccessful = address;
-                return pcm;
+                return retryWithoutTerminalStop(address, spoken, pcm, cancelled);
             } catch (IOException failure) {
                 lastFailure = failure;
             }
@@ -99,6 +103,25 @@ final class ComputerSpeech {
         spoken = PAUSE_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
         spoken = MID_SENTENCE_PAUSE.matcher(spoken).replaceAll("，");
         return TERMINAL_DOT_OR_COLON.matcher(spoken).replaceAll("。");
+    }
+
+    private static byte[] synthesisBody(String spoken) throws JSONException {
+        return new JSONObject().put("text", spoken).toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static short[] retryWithoutTerminalStop(URI address, String spoken, short[] pcm,
+                                                    BooleanSupplier cancelled) {
+        if (pcm.length <= SAMPLE_RATE * MIN_SHORT_LINE_RETRY_SECONDS) return pcm;
+        Matcher shortLine = SHORT_LINE_WITH_STOP.matcher(spoken);
+        if (!shortLine.find()
+                || pcm.length <= SAMPLE_RATE * Math.max(MIN_SHORT_LINE_RETRY_SECONDS, shortLine.group(2).length())
+                || cancelled.getAsBoolean()) return pcm;
+        try {
+            short[] retry = synthesize(address, synthesisBody(shortLine.replaceFirst("$1")));
+            return retry.length < pcm.length ? retry : pcm;
+        } catch (IOException | JSONException ignored) {
+            return pcm;
+        }
     }
 
     private static String stripOuterWrappers(String text) {
