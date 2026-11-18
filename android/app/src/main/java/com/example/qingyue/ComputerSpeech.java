@@ -18,7 +18,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.BooleanSupplier;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class ComputerSpeech {
@@ -28,18 +27,15 @@ final class ComputerSpeech {
     private static final int MAX_TEXT_CHARACTERS = 100;
     private static final int HEALTH_TIMEOUT_MS = 650;
     private static final int MAX_HEALTH_BYTES = 4096;
-    private static final int SHORT_UTTERANCE_RETRY_FRAMES = SAMPLE_RATE * 4;
-    private static final String ELLIPSIS_RUN = "(?:·{3,}+|…++|‥++|⋯{2,}+|[.．]{3,}+)";
-    private static final Pattern ELLIPSIS_BEFORE_PUNCTUATION =
-            Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*[，。！？、；：,.!?;:…])");
-    private static final Pattern ELLIPSIS_AT_SENTENCE_END =
-            Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
-    private static final Pattern ELLIPSIS_PAUSE = Pattern.compile(ELLIPSIS_RUN);
-    private static final String HAN = "[\u3400-\u4dbf\u4e00-\u9fff]";
-    private static final Pattern SHORT_UTTERANCE_END = Pattern.compile(
-            "\\A([\\s　“‘「『\"']*" + HAN + "{1,3})[!！?？.．:：]++(?=[\\s　”’」』\"']*\\z)");
-    private static final Pattern SHORT_QUOTED_STATEMENT = Pattern.compile(
-            "\\A[\\s　]*“[\\s　]*(" + HAN + "{1,12})。[\\s　]*”[\\s　]*\\z");
+    private static final String OUTER_OPEN = "“‘「『\"'（(【[〔《〈｛{［〘〚〖«‹";
+    private static final String OUTER_CLOSE = "”’」』\"'）)】]〕》〉｝}］〙〛〗»›";
+    private static final String RISKY_PAUSE = "(?:·{3,}+|…++|‥++|⋯{2,}+|[.．]{3,}+|[!！?？]++|—{3,}+)++";
+    private static final String SENTENCE_END = "(?=[\\s　]*(?:[”’」』）)】\\]〕》〉｝}］〙〛〗»›\"']|\\z))";
+    private static final Pattern PAUSE_NEXT_TO_PUNCTUATION = Pattern.compile(
+            "(?<=[，。；、,;:：])" + RISKY_PAUSE + "|" + RISKY_PAUSE + "(?=[\\s　]*[，。；、,.．;:：])");
+    private static final Pattern PAUSE_AT_SENTENCE_END = Pattern.compile(RISKY_PAUSE + SENTENCE_END);
+    private static final Pattern MID_SENTENCE_PAUSE = Pattern.compile(RISKY_PAUSE);
+    private static final Pattern TERMINAL_DOT_OR_COLON = Pattern.compile("[.．:：]++" + SENTENCE_END);
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -78,8 +74,8 @@ final class ComputerSpeech {
         if (lastSuccessful != null && candidates.remove(lastSuccessful)) {
             candidates.add(0, lastSuccessful);
         }
-        String spoken = synthesisText(text);
-        byte[] body = synthesisBody(spoken);
+        byte[] body = new JSONObject().put("text", synthesisText(text))
+                .toString().getBytes(StandardCharsets.UTF_8);
         IOException lastFailure = null;
         for (URI address : candidates) {
             if (cancelled.getAsBoolean()) return null;
@@ -88,7 +84,7 @@ final class ComputerSpeech {
                 if (cancelled.getAsBoolean()) return null;
                 short[] pcm = synthesize(address, body);
                 lastSuccessful = address;
-                return retryShortUtterance(address, spoken, pcm, cancelled);
+                return pcm;
             } catch (IOException failure) {
                 lastFailure = failure;
             }
@@ -97,34 +93,55 @@ final class ComputerSpeech {
     }
 
     private static String synthesisText(String text) {
-        // Ellipses can make the speech model generate a long noise tail.
-        String spoken = ELLIPSIS_BEFORE_PUNCTUATION.matcher(text).replaceAll("");
-        spoken = ELLIPSIS_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
-        return ELLIPSIS_PAUSE.matcher(spoken).replaceAll("，");
+        // Preserve pauses while keeping unstable punctuation away from the speech model.
+        String spoken = stripOuterWrappers(text);
+        spoken = PAUSE_NEXT_TO_PUNCTUATION.matcher(spoken).replaceAll("");
+        spoken = PAUSE_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
+        spoken = MID_SENTENCE_PAUSE.matcher(spoken).replaceAll("，");
+        return TERMINAL_DOT_OR_COLON.matcher(spoken).replaceAll("。");
     }
 
-    private static byte[] synthesisBody(String spoken) throws JSONException {
-        return new JSONObject().put("text", spoken).toString().getBytes(StandardCharsets.UTF_8);
+    private static String stripOuterWrappers(String text) {
+        String spoken = text;
+        while (true) {
+            int first = 0;
+            int last = spoken.length() - 1;
+            while (first < last && isSpace(spoken.charAt(first))) first++;
+            while (last > first && isSpace(spoken.charAt(last))) last--;
+            if (first >= last) return spoken;
+            char open = spoken.charAt(first);
+            int pair = OUTER_OPEN.indexOf(open);
+            if (pair < 0) return spoken;
+            char close = OUTER_CLOSE.charAt(pair);
+            if (spoken.charAt(last) != close || !enclosesText(spoken, first, last, open, close)) {
+                return spoken;
+            }
+            spoken = spoken.substring(0, first) + spoken.substring(first + 1, last)
+                    + spoken.substring(last + 1);
+        }
     }
 
-    private static short[] retryShortUtterance(URI address, String spoken, short[] pcm,
-                                               BooleanSupplier cancelled) {
-        if (pcm.length <= SHORT_UTTERANCE_RETRY_FRAMES || cancelled.getAsBoolean()) return pcm;
-        Matcher ending = SHORT_UTTERANCE_END.matcher(spoken);
-        String retryText;
-        if (ending.find()) {
-            retryText = ending.replaceFirst("$1。");
-        } else {
-            Matcher quoted = SHORT_QUOTED_STATEMENT.matcher(spoken);
-            if (!quoted.matches() || pcm.length <= SAMPLE_RATE * Math.max(5, quoted.group(1).length())) return pcm;
-            retryText = spoken.replace("“", "").replace("”", "");
+    private static boolean isSpace(char ch) {
+        return Character.isWhitespace(ch) || Character.isSpaceChar(ch);
+    }
+
+    private static boolean enclosesText(String text, int first, int last, char open, char close) {
+        int depth = 1;
+        for (int index = first + 1; index < last; index++) {
+            char ch = text.charAt(index);
+            if (ch == open && open != close) {
+                depth++;
+            } else if (ch == close) {
+                if ((ch == '\'' || ch == '’') && isAsciiWord(text.charAt(index - 1))
+                        && isAsciiWord(text.charAt(index + 1))) continue;
+                if (--depth == 0) return false;
+            }
         }
-        try {
-            short[] retry = synthesize(address, synthesisBody(retryText));
-            return retry.length < pcm.length ? retry : pcm;
-        } catch (IOException | JSONException ignored) {
-            return pcm;
-        }
+        return depth == 1;
+    }
+
+    private static boolean isAsciiWord(char ch) {
+        return ch < 128 && Character.isLetterOrDigit(ch);
     }
 
     private static HttpURLConnection connect(URI address, String path, int connectTimeout,
