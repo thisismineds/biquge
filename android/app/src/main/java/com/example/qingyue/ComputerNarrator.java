@@ -107,7 +107,10 @@ final class ComputerNarrator implements AutoCloseable {
         speechCache = new File(context.getCacheDir(), "narration");
         failureMessage = context.getString(R.string.tts_playback_failed);
         File noBackup = context.getNoBackupFilesDir();
-        worker.execute(() -> removeExtractedVoice(noBackup));
+        worker.execute(() -> {
+            clearAbandonedSpeechCache();
+            removeExtractedVoice(noBackup);
+        });
     }
 
     private static void removeExtractedVoice(File noBackup) {
@@ -206,22 +209,25 @@ final class ComputerNarrator implements AutoCloseable {
         if (!file.delete() && file.exists()) Log.w(TAG, "Could not delete an audio cache file");
     }
 
-    private void ensureSpeechCache() throws IOException {
-        if (!speechCache.isDirectory() && !speechCache.mkdirs() && !speechCache.isDirectory()) {
-            throw new IOException("Could not create speech cache directory");
-        }
+    private void clearAbandonedSpeechCache() {
         synchronized (CACHE_SETUP_LOCK) {
             if (checkedSpeechCache) return;
-            // No narrator from the previous process can still own these files.
-            File[] stale = speechCache.listFiles((directory, name) -> name.matches("segment-[0-9]+\\.pcm"));
-            if (stale == null) throw new IOException("Could not list speech cache files");
-            for (File file : stale) if (file.isFile()) deleteCacheFile(file);
             checkedSpeechCache = true;
+            // No narrator from the previous process can still own these files.
+            if (!speechCache.isDirectory()) return;
+            File[] stale = speechCache.listFiles((directory, name) -> name.matches("segment-[0-9]+\\.pcm"));
+            if (stale == null) {
+                Log.w(TAG, "Could not list abandoned audio cache files");
+                return;
+            }
+            for (File file : stale) if (file.isFile()) deleteCacheFile(file);
         }
     }
 
     private File writeCache(Segment segment, short[] pcm) throws IOException {
-        ensureSpeechCache();
+        if (!speechCache.isDirectory() && !speechCache.mkdirs() && !speechCache.isDirectory()) {
+            throw new IOException("Could not create speech cache directory");
+        }
         File file = File.createTempFile("segment-", ".pcm", speechCache);
         boolean saved = false;
         try {
