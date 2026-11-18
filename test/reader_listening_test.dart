@@ -10,28 +10,23 @@ import 'package:qingyue/reader/reading_layout.dart';
 import 'package:qingyue/storage/app_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+const _computerAddresses = ['http://192.168.1.20:8767'];
+
 void main() {
   testWidgets(
     'reader saves multiple PC addresses and uses them for listening',
     (tester) async {
       const channel = MethodChannel('qingyue/tts');
-      const voiceId = 'qingyue:offline-zh-pc';
-      const voiceLabel = '清朗播音 · 电脑合成';
       const addresses = ['http://192.168.1.20:8767', 'https://pc.example.test'];
       final messenger = tester.binding.defaultBinaryMessenger;
       final calls = <MethodCall>[];
       messenger.setMockMethodCallHandler(channel, (call) async {
         calls.add(call);
-        if (call.method == 'voices') {
-          return [
-            if (call.arguments != null)
-              {'id': voiceId, 'label': voiceLabel, 'networkRequired': true},
-          ];
-        }
         return null;
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
       SharedPreferences.setMockInitialValues({
+        'reader.narrationVoice': 'qingyue:offline-zh-clear',
         'reader.narrationRate': 2.0,
         '42chapters': jsonEncode([
           {'id': 51, 'name': '第一章', 'hasContent': 2},
@@ -43,7 +38,7 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final store = AppStore(prefs);
       final book = BookInfo.id(42, '电脑合成测试');
-      Future<void> openVoicePicker() async {
+      Future<void> openListening() async {
         await tester.pumpWidget(
           ReaderApp(
             store: store,
@@ -53,14 +48,13 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('听书'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('音色'));
-        await tester.pumpAndSettle();
       }
 
-      await openVoicePicker();
-      expect(find.text(voiceLabel), findsNothing);
-      await tester.tap(find.text('电脑合成设置'));
+      await openListening();
+      await tester.tap(find.text('播放'));
       await tester.pumpAndSettle();
+      expect(find.text('电脑合成设置'), findsOneWidget);
+      expect(calls, isEmpty);
       await tester.enterText(
         find.byType(TextFormField),
         'http://user@192.168.1.20:8767',
@@ -80,23 +74,8 @@ void main() {
         prefs.getStringList('reader.narrationComputerAddresses'),
         addresses,
       );
-      expect(calls.lastWhere((call) => call.method == 'voices').arguments, {
-        'computerAddresses': addresses,
-      });
-      await tester.tap(find.text(voiceLabel));
-      await tester.pumpAndSettle();
-      expect(prefs.getString('reader.narrationVoice'), voiceId);
-
       await tester.pumpWidget(const SizedBox());
-      await openVoicePicker();
-      expect(
-        tester
-            .widget<ListTile>(find.widgetWithText(ListTile, voiceLabel))
-            .selected,
-        isTrue,
-      );
-      await tester.tap(find.text(voiceLabel));
-      await tester.pumpAndSettle();
+      await openListening();
       await tester.tap(find.text('播放'));
       await tester.pumpAndSettle();
       expect(calls.where((call) => call.method == 'prepare'), hasLength(2));
@@ -104,25 +83,20 @@ void main() {
       for (final call in calls.where(
         (call) => call.method == 'speak' || call.method == 'prepare',
       )) {
-        expect(call.arguments['voice'], voiceId);
+        expect(call.arguments, isNot(contains('voice')));
         expect(call.arguments['rate'], 2.0);
         expect(call.arguments['computerAddresses'], addresses);
       }
 
-      await tester.tap(find.text('音色'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('电脑合成设置'));
+      await tester.tap(find.byTooltip('电脑合成设置'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextFormField), '');
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(prefs.getStringList('reader.narrationComputerAddresses'), isEmpty);
-      expect(prefs.getString('reader.narrationVoice'), isNull);
-      expect(find.text(voiceLabel), findsNothing);
-      final local = calls.lastWhere((call) => call.method == 'speak').arguments;
-      expect(local, isNot(contains('computerAddresses')));
-      expect(local, isNot(contains('voice')));
-      expect(local['rate'], 2.0);
+      expect(calls.where((call) => call.method == 'speak'), hasLength(1));
+      expect(calls.last.method, 'endBackground');
+      expect(find.text('播放'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -144,7 +118,7 @@ void main() {
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
       SharedPreferences.setMockInitialValues({
-        'reader.narrationVoice': 'qingyue:offline-zh-clear',
+        'reader.narrationComputerAddresses': _computerAddresses,
         'reader.narrationRate': 1.5,
         '42chapters': jsonEncode([
           {'id': 51, 'name': '第一章', 'hasContent': 2},
@@ -194,7 +168,7 @@ void main() {
       expect(methods('beginBackground'), hasLength(1));
       final first = methods('speak').single.arguments;
       expect(first['id'], current.first.arguments['id']);
-      expect(first['voice'], 'qingyue:offline-zh-clear');
+      expect(first['computerAddresses'], _computerAddresses);
       expect(first['rate'], 1.5);
       expect(find.text('本章音频已准备，播放后可锁屏'), findsNothing);
       await tester.pumpWidget(const SizedBox());
@@ -221,7 +195,7 @@ void main() {
     String chapterText(String title) =>
         List.generate(7, (i) => '$title第${i + 1}段。').join('\n');
     SharedPreferences.setMockInitialValues({
-      'reader.narrationVoice': 'qingyue:offline-zh-clear',
+      'reader.narrationComputerAddresses': _computerAddresses,
       'reader.narrationRate': 2.0,
       '42chapters': jsonEncode([
         {'id': 51, 'name': '第一章', 'hasContent': 2},
@@ -296,6 +270,7 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       final raw = List.generate(30, (i) => '第${i + 1}处石桥边有灯😀亮着，').join();
       SharedPreferences.setMockInitialValues({
+        'reader.narrationComputerAddresses': _computerAddresses,
         '42chapters': jsonEncode([
           {'id': 51, 'name': '第一章', 'hasContent': 2},
         ]),
@@ -367,7 +342,7 @@ void main() {
   );
 
   testWidgets(
-    'reader remembers a voice and plays through the chapter boundary',
+    'reader plays through the chapter boundary using computer synthesis',
     (tester) async {
       tester.view.physicalSize = const Size(320, 640);
       tester.view.devicePixelRatio = 1;
@@ -379,21 +354,8 @@ void main() {
       final utterances = <Map<Object?, Object?>>[];
       final background = <MethodCall>[];
       var stops = 0;
-      var installs = 0, voiceQueries = 0;
       messenger.setMockMethodCallHandler(channel, (call) async {
         switch (call.method) {
-          case 'voices':
-            voiceQueries++;
-            return [
-              if (installs > 0)
-                {
-                  'id': 'test-voice',
-                  'label': '测试普通话音色',
-                  'networkRequired': false,
-                },
-            ];
-          case 'installVoices':
-            installs++;
           case 'speak':
             utterances.add(call.arguments as Map<Object?, Object?>);
           case 'stop':
@@ -408,6 +370,7 @@ void main() {
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       SharedPreferences.setMockInitialValues({
+        'reader.narrationComputerAddresses': _computerAddresses,
         '42chapters': jsonEncode([
           {'id': 51, 'name': '第一章', 'hasContent': 2},
           {'id': 52, 'name': '第二章', 'hasContent': 2},
@@ -427,21 +390,6 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('听书'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('音色'));
-      await tester.pumpAndSettle();
-      expect(find.text('测试普通话音色'), findsNothing);
-      await tester.tap(find.text('系统语音设置'));
-      await tester.pumpAndSettle();
-      expect(installs, 1);
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pumpAndSettle();
-      expect(voiceQueries, 2);
-      await tester.tap(find.text('测试普通话音色'));
-      await tester.pumpAndSettle();
-      expect(prefs.getString('reader.narrationVoice'), 'test-voice');
-      expect(utterances, isEmpty);
-
       await tester.tap(find.byTooltip('朗读倍速'));
       await tester.pumpAndSettle();
       for (final label in [
@@ -464,7 +412,7 @@ void main() {
       await tester.tap(find.text('播放'));
       await tester.pumpAndSettle();
       expect((utterances.single['text'] as String).trim(), '第一章有声音。');
-      expect(utterances.single['voice'], 'test-voice');
+      expect(utterances.single['computerAddresses'], _computerAddresses);
       expect(utterances.single['rate'], 1.75);
       final firstId = utterances.single['id'];
       expect(background.first.method, 'beginBackground');
@@ -498,7 +446,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('第二章'), findsOneWidget);
       expect((utterances.last['text'] as String).trim(), '第二章接着念。');
-      expect(utterances.last['voice'], 'test-voice');
+      expect(utterances.last['computerAddresses'], _computerAddresses);
       expect(utterances.last['rate'], 1.75);
       await tester.tap(find.byTooltip('结束听书'));
       await tester.pumpAndSettle();

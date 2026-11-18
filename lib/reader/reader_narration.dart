@@ -5,7 +5,6 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-typedef NarrationVoice = ({String id, String label, bool networkRequired});
 typedef _NarrationSegment = ({int id, int start, int end, String text});
 
 class ReaderNarration extends ChangeNotifier {
@@ -17,7 +16,6 @@ class ReaderNarration extends ChangeNotifier {
   });
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
-  static const computerVoice = 'qingyue:offline-zh-pc';
   static const _channel = MethodChannel('qingyue/tts');
   static const _followingChapterSegments = 5;
   static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
@@ -30,7 +28,6 @@ class ReaderNarration extends ChangeNotifier {
   final void Function(int offset, {required bool segmentStarted})? onProgress;
 
   String? _text;
-  String? _voice;
   List<String> _computerAddresses = const [];
   double _rate = 1.0;
   int _offset = 0;
@@ -40,15 +37,12 @@ class ReaderNarration extends ChangeNotifier {
   final _following = <_NarrationSegment>[];
   final _lockPending = <int>{};
   int _lockTotal = 0, _lockFailed = 0;
-  bool _preparationScreenOn = false;
   String? _followingText;
   bool _playing = false;
   bool _background = false;
 
   bool get playing => _playing;
   bool get paused => _text != null && !_playing;
-  bool get preparesAudio =>
-      _voice == null || _voice!.startsWith('qingyue:offline-zh');
   ({int ready, int total, int failed})? get lockPreparation => _lockTotal == 0
       ? null
       : (
@@ -57,26 +51,17 @@ class ReaderNarration extends ChangeNotifier {
           failed: _lockFailed,
         );
 
-  String? get voice => _voice;
-
-  set voice(String? value) {
-    final next = value == computerVoice && _computerAddresses.isEmpty
-        ? null
-        : value;
-    if (_voice == next) return;
-    _voice = next;
-    _playbackSettingChanged();
-  }
-
   List<String> get computerAddresses => _computerAddresses;
 
   set computerAddresses(List<String> value) {
     if (listEquals(_computerAddresses, value)) return;
     _computerAddresses = List.unmodifiable(value);
-    if (_voice == computerVoice) {
-      if (value.isEmpty) _voice = null;
-      _playbackSettingChanged();
+    if (_computerAddresses.isEmpty) {
+      _reset();
+      notifyListeners();
+      return;
     }
+    _playbackSettingChanged();
   }
 
   double get rate => _rate;
@@ -99,26 +84,6 @@ class ReaderNarration extends ChangeNotifier {
     }
     notifyListeners();
   }
-
-  Future<List<NarrationVoice>> voices() async {
-    final raw = await _channel.invokeListMethod<Object?>(
-      'voices',
-      _computerAddresses.isEmpty
-          ? null
-          : {'computerAddresses': _computerAddresses},
-    );
-    return [
-      for (final item in raw ?? const [])
-        if (item case {
-          'id': final String id,
-          'label': final String label,
-          'networkRequired': final bool networkRequired,
-        })
-          (id: id, label: label, networkRequired: networkRequired),
-    ];
-  }
-
-  Future<void> installVoices() => _channel.invokeMethod<void>('installVoices');
 
   bool get backgroundActive => _background;
 
@@ -174,6 +139,7 @@ class ReaderNarration extends ChangeNotifier {
     bool paused = false,
     bool reuseFollowingChapter = false,
   }) {
+    if (_computerAddresses.isEmpty) return;
     _claimChannel();
     if (reuseFollowingChapter &&
         _text == null &&
@@ -205,7 +171,7 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void prepareForLock(String text, {int offset = 0}) {
-    if (!preparesAudio) return;
+    if (_computerAddresses.isEmpty) return;
     start(text, offset: offset, paused: true);
     _prepared.addAll(_segmentsFrom(text, _offset));
     _lockTotal = _prepared.length;
@@ -214,7 +180,6 @@ class ReaderNarration extends ChangeNotifier {
       return;
     }
     _lockPending.addAll(_prepared.map((segment) => segment.id));
-    _setPreparationScreenOn(true);
     for (final segment in _prepared) {
       unawaited(_sendSegment('prepare', segment));
     }
@@ -244,12 +209,10 @@ class ReaderNarration extends ChangeNotifier {
       _active = current;
       _reportedOffset = null;
       unawaited(_sendSegment('speak', current));
-      if (preparesAudio) {
-        final end = _prepared.isEmpty ? current.end : _prepared.last.end;
-        for (final next in _segmentsFrom(chapter, end)) {
-          _prepared.addLast(next);
-          unawaited(_sendSegment('prepare', next));
-        }
+      final end = _prepared.isEmpty ? current.end : _prepared.last.end;
+      for (final next in _segmentsFrom(chapter, end)) {
+        _prepared.addLast(next);
+        unawaited(_sendSegment('prepare', next));
       }
       return;
     }
@@ -263,7 +226,6 @@ class ReaderNarration extends ChangeNotifier {
 
   void prepareFollowingChapter(String text) {
     if ((!playing && lockPreparation == null) ||
-        !preparesAudio ||
         _followingText != null ||
         text.isEmpty) {
       return;
@@ -288,13 +250,12 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   _NarrationSegment? _segmentAt(String text, int offset) {
-    final offline = preparesAudio;
     while (offset < text.length) {
-      var limit = math.min(offset + (offline ? 100 : 250), text.length);
+      var limit = math.min(offset + 100, text.length);
       if (limit < text.length && _isLowSurrogate(text.codeUnitAt(limit))) {
         limit--;
       }
-      final end = _readableBoundary(text, offset, limit, offline);
+      final end = _readableBoundary(text, offset, limit);
       final segment = text.substring(offset, end);
       if (segment.trim().isNotEmpty) {
         return (id: ++_nextId, start: offset, end: end, text: segment);
@@ -304,12 +265,12 @@ class ReaderNarration extends ChangeNotifier {
     return null;
   }
 
-  int _readableBoundary(String text, int offset, int limit, bool natural) {
+  int _readableBoundary(String text, int offset, int limit) {
     final section = text.substring(offset, limit);
     var sentences = 0, lastBoundary = 0;
     for (final breakPoint in _sentenceEnd.allMatches(section)) {
       lastBoundary = breakPoint.end;
-      if (!natural || breakPoint[0] == '\n' || ++sentences == 3) {
+      if (breakPoint[0] == '\n' || ++sentences == 3) {
         return offset + lastBoundary;
       }
     }
@@ -325,18 +286,17 @@ class ReaderNarration extends ChangeNotifier {
         'id': segment.id,
         'text': segment.text,
         'rate': _rate,
-        if (_voice != null) 'voice': _voice,
-        if (_voice == computerVoice) 'computerAddresses': _computerAddresses,
+        'computerAddresses': _computerAddresses,
       });
     } on PlatformException catch (error) {
       if (method == 'speak') {
-        _fail(segment.id, error.message ?? '语音引擎暂时无法朗读。');
+        _fail(segment.id, error.message ?? '电脑合成暂时无法朗读。');
       } else {
         _settleLockSegment(segment.id, false);
       }
     } on MissingPluginException {
       if (method == 'speak') {
-        _fail(segment.id, '当前设备不支持系统朗读。');
+        _fail(segment.id, '当前设备不支持电脑合成听书。');
       } else {
         _settleLockSegment(segment.id, false);
       }
@@ -413,21 +373,13 @@ class ReaderNarration extends ChangeNotifier {
   void _settleLockSegment(int id, bool ok) {
     if (!_lockPending.remove(id)) return;
     if (!ok) _lockFailed++;
-    if (_lockPending.isEmpty) _setPreparationScreenOn(false);
     notifyListeners();
-  }
-
-  void _setPreparationScreenOn(bool value) {
-    if (_preparationScreenOn == value) return;
-    _preparationScreenOn = value;
-    unawaited(_sendBackground('keepPreparationScreenOn', value));
   }
 
   void _endLockPreparation() {
     _lockPending.clear();
     _lockTotal = 0;
     _lockFailed = 0;
-    _setPreparationScreenOn(false);
   }
 
   Future<void> _stopEngine() async {

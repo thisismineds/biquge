@@ -45,11 +45,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _startingPlayback = false, _listenOnReady = false;
   int _listeningRun = 0;
   int _followingChapterRequest = 0;
-  static const _voicePreference = 'reader.narrationVoice';
   static const _ratePreference = 'reader.narrationRate';
   static const _computerAddressesPreference =
       'reader.narrationComputerAddresses';
-  final _voiceRefresh = ValueNotifier(0);
   late final ReaderNarration _narration;
   AppStore get store => widget.store;
   bool get _canSwitchMirror => widget.book.sourceId == 'bqg631';
@@ -75,7 +73,6 @@ class _ReaderScreenState extends State<ReaderScreen>
           ..computerAddresses =
               store.preferences.getStringList(_computerAddressesPreference) ??
               const []
-          ..voice = store.preferences.getString(_voicePreference)
           ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
     WidgetsBinding.instance.addObserver(this);
     store.addListener(_changed);
@@ -226,7 +223,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _prepareFollowingChapter() async {
     if (_busy ||
         (!_narration.playing && _narration.lockPreparation == null) ||
-        !_narration.preparesAudio ||
         _chapter + 1 >= _chapters.length) {
       return;
     }
@@ -243,8 +239,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           run != _listeningRun ||
           chapter != _chapter ||
           _busy ||
-          (!_narration.playing && _narration.lockPreparation == null) ||
-          !_narration.preparesAudio) {
+          (!_narration.playing && _narration.lockPreparation == null)) {
         return;
       }
       final text = formatChapter(raw);
@@ -316,7 +311,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_busy ||
         _startingPlayback ||
         _narration.playing ||
-        !_narration.preparesAudio) {
+        _narration.computerAddresses.isEmpty) {
       return;
     }
     _endListening();
@@ -326,6 +321,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _toggleNarration() async {
     if (_startingPlayback) return;
+    if (_narration.computerAddresses.isEmpty) {
+      await _configureComputerSpeech();
+      return;
+    }
     if (_narration.playing) {
       _listeningTransport('pause');
     } else if (_narration.paused && _narration.lockPreparation == null) {
@@ -368,127 +367,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  Future<void> _chooseNarrationVoice() async {
-    Future<List<NarrationVoice>>? voices;
-    var voiceRevision = -1;
-    final selected = await showModalBottomSheet<(String?,)>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (context) => FractionallySizedBox(
-        heightFactor: .72,
-        child: ValueListenableBuilder(
-          valueListenable: _voiceRefresh,
-          builder: (context, revision, _) {
-            if (voiceRevision != revision) {
-              voiceRevision = revision;
-              voices = _narration.voices();
-            }
-            return FutureBuilder<List<NarrationVoice>>(
-              future: voices,
-              builder: (context, snapshot) {
-                final items = snapshot.data ?? const [];
-                Widget voiceTile(
-                  String? id,
-                  String label, {
-                  bool network = false,
-                }) {
-                  final current = _narration.voice == id;
-                  return ListTile(
-                    title: Text(label),
-                    subtitle: id == ReaderNarration.computerVoice
-                        ? const Text('手机与电脑须在同一局域网')
-                        : network
-                        ? const Text('需要联网')
-                        : null,
-                    selected: current,
-                    trailing: current ? const Icon(Icons.check_rounded) : null,
-                    onTap: () => Navigator.pop(context, (id,)),
-                  );
-                }
-
-                final error = snapshot.error;
-                return SafeArea(
-                  top: false,
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                        child: Text(
-                          '中文音色',
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                      ),
-                      voiceTile(null, '自动选择'),
-                      ListTile(
-                        leading: const Icon(Icons.computer_outlined),
-                        title: const Text('电脑合成设置'),
-                        subtitle: Text(
-                          _narration.computerAddresses.isEmpty
-                              ? '添加运行合成服务的电脑地址'
-                              : '已保存 ${_narration.computerAddresses.length} 个地址',
-                        ),
-                        onTap: () => _configureComputerSpeech(context),
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.settings_outlined),
-                        title: const Text('系统语音设置'),
-                        subtitle: const Text('打开手机的语音引擎设置'),
-                        onTap: () => _installNarrationVoices(context),
-                      ),
-                      if (snapshot.connectionState == ConnectionState.waiting)
-                        const LinearProgressIndicator(semanticsLabel: '正在读取音色')
-                      else if (items.isEmpty)
-                        ListTile(
-                          title: Text(
-                            error is PlatformException && error.message != null
-                                ? error.message!
-                                : '手机语音引擎暂未提供其他中文音色。',
-                          ),
-                        )
-                      else
-                        for (final voice in items)
-                          voiceTile(
-                            voice.id,
-                            voice.label,
-                            network: voice.networkRequired,
-                          ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        ),
-      ),
-    );
-    if (!mounted || selected == null) return;
-    final voice = selected.$1;
-    if (_narration.voice != voice) {
-      _narration.voice = voice;
-      unawaited(_prepareFollowingChapter());
-    }
-    await _saveNarrationVoice(voice);
-  }
-
-  Future<void> _saveNarrationVoice(String? voice) async {
-    try {
-      final saved = await (voice == null
-          ? store.preferences.remove(_voicePreference)
-          : store.preferences.setString(_voicePreference, voice));
-      if (!saved && mounted) _notice('本次音色已切换，但未能保存选择。');
-    } catch (_) {
-      if (mounted) _notice('本次音色已切换，但未能保存选择。');
-    }
-  }
-
-  Future<void> _configureComputerSpeech(BuildContext sheetContext) async {
+  Future<void> _configureComputerSpeech() async {
     final form = GlobalKey<FormState>();
     final input = _narration.computerAddresses.join('\n');
     final parsed = <String>{};
     final addresses = await showDialog<List<String>>(
-      context: sheetContext,
+      context: context,
       builder: (context) => AlertDialog(
         scrollable: true,
         title: const Text('电脑合成设置'),
@@ -538,13 +422,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       ),
     );
     if (!mounted || addresses == null) return;
-    final wasComputerVoice = _narration.voice == ReaderNarration.computerVoice;
+    if (addresses.isEmpty) _endListening();
     _narration.computerAddresses = addresses;
-    _voiceRefresh.value++;
-    if (wasComputerVoice) {
-      unawaited(_prepareFollowingChapter());
-      if (addresses.isEmpty) unawaited(_saveNarrationVoice(null));
-    }
+    unawaited(_prepareFollowingChapter());
     try {
       final saved = await store.preferences.setStringList(
         _computerAddressesPreference,
@@ -575,32 +455,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       return null;
     }
     return uri.origin;
-  }
-
-  Future<void> _installNarrationVoices(BuildContext sheetContext) async {
-    _listeningTransport('pause');
-    try {
-      await _narration.installVoices();
-    } catch (error) {
-      if (!sheetContext.mounted) return;
-      await showDialog<void>(
-        context: sheetContext,
-        builder: (context) => AlertDialog(
-          title: const Text('无法打开音色下载'),
-          content: Text(
-            error is PlatformException && error.message != null
-                ? error.message!
-                : '请在手机设置中搜索「文字转语音」，查看可下载的中文音色。',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
-    }
   }
 
   Future<void> _chooseNarrationRate(double rate) async {
@@ -649,11 +503,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                     : '播放',
               ),
             ),
-            TextButton.icon(
-              onPressed: _chooseNarrationVoice,
-              style: compactButton,
-              icon: const Icon(Icons.record_voice_over_outlined),
-              label: const Text('音色'),
+            IconButton(
+              tooltip: '电脑合成设置',
+              onPressed: _configureComputerSpeech,
+              icon: const Icon(Icons.computer_outlined),
             ),
             PopupMenuButton<double>(
               tooltip: '朗读倍速',
@@ -684,7 +537,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               },
               icon: const Icon(Icons.stop_rounded),
             ),
-            if (!playing && _narration.preparesAudio)
+            if (!playing && _narration.computerAddresses.isNotEmpty)
               IconButton(
                 tooltip: preparation == null ? '锁屏准备' : '取消准备',
                 onPressed: preparation == null
@@ -808,7 +661,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _voiceRefresh.value++;
       if (!_busy && _spokenOffset != null && _pages.isNotEmpty) {
         _syncPageController();
       }
@@ -822,7 +674,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.removeObserver(this);
     store.removeListener(_changed);
     _narration.dispose();
-    _voiceRefresh.dispose();
     _save();
     _controller?.dispose();
     super.dispose();
