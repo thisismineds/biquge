@@ -1,19 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'app/reader_theme.dart';
-import 'reader/reader_narration.dart';
 import 'storage/app_store.dart';
 import 'ui/reader_shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final store = await AppStore.load();
-  await ReaderNarration.syncSystemSpeechServers(
-    store.preferences.getStringList(
-          ReaderNarration.computerAddressesPreference,
-        ) ??
-        const [],
-  );
   runApp(ReaderApp(store: store));
 }
 

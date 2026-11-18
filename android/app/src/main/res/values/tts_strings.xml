@@ -2,6 +2,4 @@
     <string name="tts_invalid_speech">本段朗读参数无效。</string>
     <string name="tts_playback_failed">听书音频播放失败，请重试。</string>
     <string name="tts_computer_address">请先在听书设置中填写电脑地址。</string>
-    <string name="tts_system_engine_name">清阅语音引擎</string>
-    <string name="tts_system_sample">这里是清阅。夜色渐深，微风拂过窗台，故事就从这一页开始。</string>
 </resources>

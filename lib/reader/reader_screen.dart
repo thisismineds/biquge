@@ -46,6 +46,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _listeningRun = 0;
   int _followingChapterRequest = 0;
   static const _ratePreference = 'reader.narrationRate';
+  static const _computerAddressesPreference =
+      'reader.narrationComputerAddresses';
   late final ReaderNarration _narration;
   AppStore get store => widget.store;
   bool get _canSwitchMirror => widget.book.sourceId == 'bqg631';
@@ -69,9 +71,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             onProgress: _showNarrationPosition,
           )
           ..computerAddresses =
-              store.preferences.getStringList(
-                ReaderNarration.computerAddressesPreference,
-              ) ??
+              store.preferences.getStringList(_computerAddressesPreference) ??
               const []
           ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
     WidgetsBinding.instance.addObserver(this);
@@ -376,46 +376,34 @@ class _ReaderScreenState extends State<ReaderScreen>
       builder: (context) => AlertDialog(
         scrollable: true,
         title: const Text('电脑合成设置'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Form(
-              key: form,
-              child: TextFormField(
-                initialValue: input,
-                minLines: 3,
-                maxLines: 5,
-                autocorrect: false,
-                enableSuggestions: false,
-                keyboardType: TextInputType.multiline,
-                decoration: const InputDecoration(
-                  labelText: '电脑地址',
-                  hintText: '192.168.1.20:8767',
-                  helperText: '每行一个地址，自动连接可用的电脑。留空可清除。',
-                  helperMaxLines: 2,
-                ),
-                validator: (value) {
-                  parsed.clear();
-                  final lines = (value ?? '').split('\n');
-                  for (final (index, line) in lines.indexed) {
-                    final address = line.trim();
-                    if (address.isEmpty) continue;
-                    final origin = _computerOrigin(address);
-                    if (origin == null) return '第 ${index + 1} 行不是有效的电脑地址。';
-                    parsed.add(origin);
-                  }
-                  return null;
-                },
-              ),
+        content: Form(
+          key: form,
+          child: TextFormField(
+            initialValue: input,
+            minLines: 3,
+            maxLines: 5,
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.multiline,
+            decoration: const InputDecoration(
+              labelText: '电脑地址',
+              hintText: '192.168.1.20:8767',
+              helperText: '每行一个地址，自动连接可用的电脑。留空可清除。',
+              helperMaxLines: 2,
             ),
-            const SizedBox(height: 12),
-            Text(
-              '在手机的「文字转语音」设置中选择「清阅语音引擎」，'
-              '系统朗读会连接这里的电脑合成。',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
+            validator: (value) {
+              parsed.clear();
+              final lines = (value ?? '').split('\n');
+              for (final (index, line) in lines.indexed) {
+                final address = line.trim();
+                if (address.isEmpty) continue;
+                final origin = _computerOrigin(address);
+                if (origin == null) return '第 ${index + 1} 行不是有效的电脑地址。';
+                parsed.add(origin);
+              }
+              return null;
+            },
+          ),
         ),
         actions: [
           TextButton(
@@ -437,22 +425,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (addresses.isEmpty) _endListening();
     _narration.computerAddresses = addresses;
     unawaited(_prepareFollowingChapter());
-    final preferences = store.preferences;
-    const key = ReaderNarration.computerAddressesPreference;
     try {
-      final saved = await preferences.setStringList(key, addresses);
-      if (!saved) {
-        if (mounted) _notice('本次地址已更新，但未能保存。');
-        return;
-      }
+      final saved = await store.preferences.setStringList(
+        _computerAddressesPreference,
+        addresses,
+      );
+      if (!saved && mounted) _notice('本次地址已更新，但未能保存。');
     } catch (_) {
       if (mounted) _notice('本次地址已更新，但未能保存。');
-      return;
     }
-    final synced = await ReaderNarration.syncSystemSpeechServers(
-      preferences.getStringList(key) ?? const [],
-    );
-    if (!synced && mounted) _notice('系统朗读地址同步失败，可继续使用清阅内的听书。');
   }
 
   String? _computerOrigin(String address) {
