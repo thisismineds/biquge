@@ -27,11 +27,12 @@ final class ComputerSpeech {
     private static final int MAX_TEXT_CHARACTERS = 100;
     private static final int HEALTH_TIMEOUT_MS = 650;
     private static final int MAX_HEALTH_BYTES = 4096;
-    private static final Pattern DOTS_BEFORE_PUNCTUATION =
-            Pattern.compile("·{3,}(?=[\\s　]*[，。！？、；：,.!?;:…])");
-    private static final Pattern DOTS_AT_SENTENCE_END =
-            Pattern.compile("·{3,}(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
-    private static final Pattern MIDDLE_DOT_PAUSE = Pattern.compile("·{3,}");
+    private static final String ELLIPSIS_RUN = "(?:·{3,}+|…{2,}+|\\.{3,}+)";
+    private static final Pattern ELLIPSIS_BEFORE_PUNCTUATION =
+            Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*[，。！？、；：,.!?;:…])");
+    private static final Pattern ELLIPSIS_AT_SENTENCE_END =
+            Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
+    private static final Pattern ELLIPSIS_PAUSE = Pattern.compile(ELLIPSIS_RUN);
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -89,10 +90,10 @@ final class ComputerSpeech {
     }
 
     private static String synthesisText(String text) {
-        // Repeated middle dots can make the speech model generate a long noise tail.
-        String spoken = DOTS_BEFORE_PUNCTUATION.matcher(text).replaceAll("");
-        spoken = DOTS_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
-        return MIDDLE_DOT_PAUSE.matcher(spoken).replaceAll("，");
+        // Ellipses can make the speech model generate a long noise tail.
+        String spoken = ELLIPSIS_BEFORE_PUNCTUATION.matcher(text).replaceAll("");
+        spoken = ELLIPSIS_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
+        return ELLIPSIS_PAUSE.matcher(spoken).replaceAll("，");
     }
 
     private static HttpURLConnection connect(URI address, String path, int connectTimeout,
