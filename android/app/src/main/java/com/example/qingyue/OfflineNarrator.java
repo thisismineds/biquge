@@ -131,6 +131,7 @@ final class OfflineNarrator implements AutoCloseable {
         final Voice voice;
         volatile boolean cancelled;
         volatile boolean cacheToDisk;
+        Consumer<Boolean> preparation;
         IntConsumer progress;
         Consumer<String> completion;
         BufferedSpeech ready;
@@ -304,14 +305,16 @@ final class OfflineNarrator implements AutoCloseable {
         }
     }
 
-    void prepare(long id, String text, float speed, Voice voice) {
-        if (lastSpokenId == null || id <= lastSpokenId || prepared.containsKey(id)
-                || (current != null && (current.speed != speed || current.voice != voice))) return;
+    boolean prepare(long id, String text, float speed, Voice voice, Consumer<Boolean> onPrepared) {
+        if ((lastSpokenId != null && id <= lastSpokenId) || prepared.containsKey(id)
+                || (current != null && (current.speed != speed || current.voice != voice))) return false;
         Segment segment = new Segment(id, text, speed, voice);
         segment.cacheToDisk = true;
+        segment.preparation = onPrepared;
         segment.retryOnPreparationFailure = true;
         prepared.put(id, segment);
         worker.execute(segment);
+        return true;
     }
 
     void speak(long id, String text, float speed, Voice voice, IntConsumer progress,
@@ -481,8 +484,11 @@ final class OfflineNarrator implements AutoCloseable {
             segment.ready = audio;
             if (segment == current) {
                 playWhenReady(segment);
-            } else if (audio.frames > 0 && Log.isLoggable(TAG, Log.DEBUG)) {
-                Log.d(TAG, "Buffered next narration segment");
+            } else {
+                segment.preparation.accept(audio.failure == null);
+                if (audio.frames > 0 && Log.isLoggable(TAG, Log.DEBUG)) {
+                    Log.d(TAG, "Buffered next narration segment");
+                }
             }
         })) audio.release();
     }

@@ -9,6 +9,7 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
 import android.util.Log;
+import android.view.WindowManager;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -73,6 +74,10 @@ public class MainActivity extends FlutterActivity {
                 case "prepare":
                     prepare(call.argument("id"), call.argument("text"), call.argument("rate"),
                             call.argument("voice"));
+                    result.success(null);
+                    break;
+                case "keepPreparationScreenOn":
+                    keepPreparationScreenOn(Boolean.TRUE.equals(call.arguments));
                     result.success(null);
                     break;
                 case "stop":
@@ -246,10 +251,27 @@ public class MainActivity extends FlutterActivity {
     }
 
     private void prepare(Number id, String text, Number rate, String voiceId) {
-        if (offline == null) return;
-        OfflineNarrator.Voice voice = offline.selectVoice(voiceId);
-        if (voice != null && offline.isAvailable(voice) && validSpeech(id, text, rate)) {
-            offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice);
+        OfflineNarrator.Voice voice = offline == null ? null : offline.selectVoice(voiceId);
+        if (voice == null || !offline.isAvailable(voice) || !validSpeech(id, text, rate)
+                || !offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice,
+                        ok -> notifyPrepared(id, ok))) {
+            notifyPrepared(id, false);
+        }
+    }
+
+    private void notifyPrepared(Number id, boolean ok) {
+        if (speech == null || id == null) return;
+        Map<String, Object> event = new HashMap<>();
+        event.put("id", id);
+        event.put("ok", ok);
+        speech.invokeMethod("prepared", event);
+    }
+
+    private void keepPreparationScreenOn(boolean enabled) {
+        if (enabled) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
     }
 
@@ -339,6 +361,7 @@ public class MainActivity extends FlutterActivity {
     }
 
     private void stopSpeech() {
+        keepPreparationScreenOn(false);
         resetSpeechCallback();
         if (offline != null) offline.stop();
     }

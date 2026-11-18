@@ -220,7 +220,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _prepareFollowingChapter() async {
     if (_busy ||
-        !_narration.playing ||
+        (!_narration.playing && _narration.lockPreparation == null) ||
         !_narration.preparesAudio ||
         _chapter + 1 >= _chapters.length) {
       return;
@@ -238,7 +238,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           run != _listeningRun ||
           chapter != _chapter ||
           _busy ||
-          !_narration.playing ||
+          (!_narration.playing && _narration.lockPreparation == null) ||
           !_narration.preparesAudio) {
         return;
       }
@@ -307,11 +307,23 @@ class _ReaderScreenState extends State<ReaderScreen>
     _narration.endBackground();
   }
 
+  void _prepareLockAudio() {
+    if (_busy ||
+        _startingPlayback ||
+        _narration.playing ||
+        !_narration.preparesAudio) {
+      return;
+    }
+    _endListening();
+    _narration.prepareForLock(_text, offset: _visibleOffset);
+    unawaited(_prepareFollowingChapter());
+  }
+
   Future<void> _toggleNarration() async {
     if (_startingPlayback) return;
     if (_narration.playing) {
       _listeningTransport('pause');
-    } else if (_narration.paused) {
+    } else if (_narration.paused && _narration.lockPreparation == null) {
       _listeningTransport('resume', fromPage: true);
     } else {
       final run = ++_listeningRun;
@@ -323,11 +335,17 @@ class _ReaderScreenState extends State<ReaderScreen>
           _chapters[_chapter].name,
         );
         if (!mounted || run != _listeningRun) return;
-        _narration.start(
-          _text,
-          offset: _visibleOffset,
-          paused: !_listenOnReady,
-        );
+        if (!_narration.playing) {
+          if (_narration.lockPreparation != null) {
+            if (_listenOnReady) _narration.resume();
+          } else {
+            _narration.start(
+              _text,
+              offset: _visibleOffset,
+              paused: !_listenOnReady,
+            );
+          }
+        }
         _updateListeningNotification();
         unawaited(_prepareFollowingChapter());
       } catch (error) {
@@ -489,28 +507,34 @@ class _ReaderScreenState extends State<ReaderScreen>
     listenable: _narration,
     builder: (context, _) {
       final playing = _narration.playing;
+      final preparation = _narration.lockPreparation;
+      final compactButton = TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+      );
       return IconTheme(
         data: IconThemeData(color: ink),
         child: Wrap(
-          spacing: 4,
+          spacing: 2,
           alignment: WrapAlignment.center,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             TextButton.icon(
               onPressed: _toggleNarration,
+              style: compactButton,
               icon: Icon(
                 playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
               ),
               label: Text(
                 playing
                     ? '暂停'
-                    : _narration.paused
+                    : _narration.paused && preparation == null
                     ? '继续'
                     : '播放',
               ),
             ),
             TextButton.icon(
               onPressed: _chooseNarrationVoice,
+              style: compactButton,
               icon: const Icon(Icons.record_voice_over_outlined),
               label: const Text('音色'),
             ),
@@ -528,7 +552,6 @@ class _ReaderScreenState extends State<ReaderScreen>
               ],
               child: Container(
                 constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Center(
                   widthFactor: 1,
                   heightFactor: 1,
@@ -544,6 +567,32 @@ class _ReaderScreenState extends State<ReaderScreen>
               },
               icon: const Icon(Icons.stop_rounded),
             ),
+            if (!playing && _narration.preparesAudio)
+              IconButton(
+                tooltip: preparation == null ? '锁屏准备' : '取消准备',
+                onPressed: preparation == null
+                    ? _prepareLockAudio
+                    : _endListening,
+                icon: Icon(
+                  preparation == null
+                      ? Icons.lock_clock_outlined
+                      : Icons.cancel_outlined,
+                ),
+              ),
+            if (preparation != null)
+              SizedBox(
+                width: double.infinity,
+                child: Text(
+                  preparation.ready + preparation.failed < preparation.total
+                      ? '准备本章音频 ${preparation.ready}/${preparation.total} 段'
+                      : preparation.failed > 0
+                      ? '${preparation.failed} 段将在播放时重试'
+                      : '本章音频已准备，播放后可锁屏',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: ink),
+                ),
+              ),
           ],
         ),
       );
@@ -693,7 +742,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     } else if (index - 1 != _page) {
       setState(() => _page = index - 1);
       _spokenOffset = null;
-      if (_narration.backgroundActive) {
+      if (_narration.lockPreparation != null) {
+        _endListening();
+      } else if (_narration.backgroundActive) {
         _listenOnReady = false;
         _narration.start(_text, offset: _visibleOffset, paused: true);
         _updateListeningNotification();

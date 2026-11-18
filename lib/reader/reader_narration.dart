@@ -36,6 +36,9 @@ class ReaderNarration extends ChangeNotifier {
   int? _reportedOffset;
   final _prepared = Queue<_NarrationSegment>();
   final _following = <_NarrationSegment>[];
+  final _lockPending = <int>{};
+  int _lockTotal = 0, _lockFailed = 0;
+  bool _preparationScreenOn = false;
   String? _followingText;
   bool _playing = false;
   bool _background = false;
@@ -44,6 +47,13 @@ class ReaderNarration extends ChangeNotifier {
   bool get paused => _text != null && !_playing;
   bool get preparesAudio =>
       _voice == null || _voice!.startsWith('qingyue:offline-zh');
+  ({int ready, int total, int failed})? get lockPreparation => _lockTotal == 0
+      ? null
+      : (
+          ready: _lockTotal - _lockPending.length - _lockFailed,
+          total: _lockTotal,
+          failed: _lockFailed,
+        );
 
   String? get voice => _voice;
 
@@ -63,8 +73,14 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _playbackSettingChanged() {
+    final preparedForLock = lockPreparation != null;
     _endUtterance();
-    if (_playing) _speakNext();
+    if (_playing) {
+      _speakNext();
+    } else if (preparedForLock) {
+      _text = null;
+      _releaseChannel();
+    }
     notifyListeners();
   }
 
@@ -167,8 +183,26 @@ class ReaderNarration extends ChangeNotifier {
     notifyListeners();
   }
 
+  void prepareForLock(String text, {int offset = 0}) {
+    if (!preparesAudio) return;
+    start(text, offset: offset, paused: true);
+    _prepared.addAll(_segmentsFrom(text, _offset));
+    _lockTotal = _prepared.length;
+    if (_lockTotal == 0) {
+      stop();
+      return;
+    }
+    _lockPending.addAll(_prepared.map((segment) => segment.id));
+    _setPreparationScreenOn(true);
+    for (final segment in _prepared) {
+      unawaited(_sendSegment('prepare', segment));
+    }
+    notifyListeners();
+  }
+
   void resume() {
     if (!paused) return;
+    _endLockPreparation();
     _playing = true;
     _speakNext();
     notifyListeners();
@@ -191,11 +225,9 @@ class ReaderNarration extends ChangeNotifier {
       unawaited(_sendSegment('speak', current));
       if (preparesAudio) {
         final end = _prepared.isEmpty ? current.end : _prepared.last.end;
-        var next = _segmentAt(chapter, end);
-        while (next != null) {
+        for (final next in _segmentsFrom(chapter, end)) {
           _prepared.addLast(next);
           unawaited(_sendSegment('prepare', next));
-          next = _segmentAt(chapter, next.end);
         }
       }
       return;
@@ -209,7 +241,10 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void prepareFollowingChapter(String text) {
-    if (!playing || !preparesAudio || _followingText != null || text.isEmpty) {
+    if ((!playing && lockPreparation == null) ||
+        !preparesAudio ||
+        _followingText != null ||
+        text.isEmpty) {
       return;
     }
     _followingText = text;
@@ -220,6 +255,14 @@ class ReaderNarration extends ChangeNotifier {
       end = next.end;
       _following.add(next);
       unawaited(_sendSegment('prepare', next));
+    }
+  }
+
+  Iterable<_NarrationSegment> _segmentsFrom(String text, int offset) sync* {
+    var next = _segmentAt(text, offset);
+    while (next != null) {
+      yield next;
+      next = _segmentAt(text, next.end);
     }
   }
 
@@ -266,14 +309,26 @@ class ReaderNarration extends ChangeNotifier {
     } on PlatformException catch (error) {
       if (method == 'speak') {
         _fail(segment.id, error.message ?? '语音引擎暂时无法朗读。');
+      } else {
+        _settleLockSegment(segment.id, false);
       }
     } on MissingPluginException {
-      if (method == 'speak') _fail(segment.id, '当前设备不支持系统朗读。');
+      if (method == 'speak') {
+        _fail(segment.id, '当前设备不支持系统朗读。');
+      } else {
+        _settleLockSegment(segment.id, false);
+      }
     }
   }
 
   Future<void> _handleEvent(MethodCall call) async {
     final args = call.arguments;
+    if (call.method == 'prepared') {
+      if (args case {'id': final int id, 'ok': final bool ok}) {
+        _settleLockSegment(id, ok);
+      }
+      return;
+    }
     if (call.method == 'transport') {
       if (_background && args is Map) {
         final action = args['action'];
@@ -323,6 +378,7 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   void _endUtterance() {
+    _endLockPreparation();
     final hadAudio =
         _active != null || _prepared.isNotEmpty || _following.isNotEmpty;
     _active = null;
@@ -330,6 +386,26 @@ class ReaderNarration extends ChangeNotifier {
     _following.clear();
     _followingText = null;
     if (hadAudio) unawaited(_stopEngine());
+  }
+
+  void _settleLockSegment(int id, bool ok) {
+    if (!_lockPending.remove(id)) return;
+    if (!ok) _lockFailed++;
+    if (_lockPending.isEmpty) _setPreparationScreenOn(false);
+    notifyListeners();
+  }
+
+  void _setPreparationScreenOn(bool value) {
+    if (_preparationScreenOn == value) return;
+    _preparationScreenOn = value;
+    unawaited(_sendBackground('keepPreparationScreenOn', value));
+  }
+
+  void _endLockPreparation() {
+    _lockPending.clear();
+    _lockTotal = 0;
+    _lockFailed = 0;
+    _setPreparationScreenOn(false);
   }
 
   Future<void> _stopEngine() async {

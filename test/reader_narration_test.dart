@@ -18,14 +18,24 @@ void main() {
       calls.where((call) => call.method == 'speak').toList();
   int id(MethodCall call) => call.arguments['id'] as int;
   String text(MethodCall call) => call.arguments['text'] as String;
-  Future<void> event(String method, int id, {String? message, int? offset}) =>
-      messenger.handlePlatformMessage(
-        channel.name,
-        codec.encodeMethodCall(
-          MethodCall(method, {'id': id, 'message': message, 'offset': offset}),
-        ),
-        (_) {},
-      );
+  Future<void> event(
+    String method,
+    int id, {
+    String? message,
+    int? offset,
+    bool? ok,
+  }) => messenger.handlePlatformMessage(
+    channel.name,
+    codec.encodeMethodCall(
+      MethodCall(method, {
+        'id': id,
+        'message': message,
+        'offset': offset,
+        'ok': ok,
+      }),
+    ),
+    (_) {},
+  );
 
   setUp(() {
     calls.clear();
@@ -44,6 +54,44 @@ void main() {
   tearDown(() {
     narration.dispose();
     messenger.setMockMethodCallHandler(channel, null);
+  });
+
+  test(
+    'lock preparation waits for audio and plays the prepared first segment',
+    () async {
+      narration.voice = 'qingyue:offline-zh-clear';
+      narration.prepareForLock('跳过。甲段。\n乙段。', offset: 3);
+      final queued = calls.where((call) => call.method == 'prepare').toList();
+      expect(queued.map(text), ['甲段。\n', '乙段。']);
+      expect(spoken(), isEmpty);
+      expect(narration.lockPreparation, (ready: 0, total: 2, failed: 0));
+      expect(calls.first.arguments, true);
+
+      await event('prepared', id(queued.first), ok: true);
+      await event('prepared', id(queued.first), ok: true);
+      expect(narration.lockPreparation, (ready: 1, total: 2, failed: 0));
+      await event('prepared', id(queued.last), ok: true);
+      expect(narration.lockPreparation, (ready: 2, total: 2, failed: 0));
+      expect(calls.last.method, 'keepPreparationScreenOn');
+      expect(calls.last.arguments, false);
+
+      narration.resume();
+      expect(narration.lockPreparation, isNull);
+      expect(id(spoken().single), id(queued.first));
+      expect(calls.where((call) => call.method == 'stop'), isEmpty);
+    },
+  );
+
+  test('lock preparation invalidates old audio after changing speed', () async {
+    narration.voice = 'qingyue:offline-zh-clear';
+    narration.prepareForLock('甲段。');
+    final prepared = calls.singleWhere((call) => call.method == 'prepare');
+    await event('prepared', id(prepared), ok: false);
+    expect(narration.lockPreparation, (ready: 0, total: 1, failed: 1));
+    narration.rate = 1.5;
+    expect(narration.lockPreparation, isNull);
+    expect(narration.paused, isFalse);
+    expect(calls.last.method, 'stop');
   });
 
   test(

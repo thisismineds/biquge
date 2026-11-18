@@ -11,6 +11,80 @@ import 'package:qingyue/storage/app_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets(
+    'reader prepares the chapter before starting lock-screen playback',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      const channel = MethodChannel('qingyue/tts');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      SharedPreferences.setMockInitialValues({
+        'reader.narrationVoice': 'qingyue:offline-zh-clear',
+        'reader.narrationRate': 1.5,
+        '42chapters': jsonEncode([
+          {'id': 51, 'name': '第一章', 'hasContent': 2},
+          {'id': 52, 'name': '第二章', 'hasContent': 2},
+        ]),
+        '51': '第一章第一段。\n第一章第二段。',
+        '52': '第二章第一段。',
+      });
+      final store = AppStore(await SharedPreferences.getInstance());
+      final book = BookInfo.id(42, '锁屏准备测试');
+      await tester.pumpWidget(
+        ReaderApp(
+          store: store,
+          home: ReaderScreen(store: store, book: book),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('听书'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('锁屏准备'));
+      await tester.pumpAndSettle();
+
+      Iterable<MethodCall> methods(String name) =>
+          calls.where((call) => call.method == name);
+      final current = methods('prepare')
+          .where((call) => call.arguments['text'].contains('第一章'))
+          .toList();
+      expect(current, hasLength(2));
+      expect(methods('prepare'), hasLength(3));
+      expect(methods('speak'), isEmpty);
+      expect(methods('beginBackground'), isEmpty);
+      expect(find.text('准备本章音频 0/2 段'), findsOneWidget);
+
+      for (final call in current) {
+        await messenger.handlePlatformMessage(
+          channel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('prepared', {'id': call.arguments['id'], 'ok': true}),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+      }
+      expect(find.text('本章音频已准备，播放后可锁屏'), findsOneWidget);
+      await tester.tap(find.text('播放'));
+      await tester.pumpAndSettle();
+      expect(methods('beginBackground'), hasLength(1));
+      final first = methods('speak').single.arguments;
+      expect(first['id'], current.first.arguments['id']);
+      expect(first['voice'], 'qingyue:offline-zh-clear');
+      expect(first['rate'], 1.5);
+      expect(find.text('本章音频已准备，播放后可锁屏'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('reader reuses the five prepared segments of the next chapter', (
     tester,
   ) async {
