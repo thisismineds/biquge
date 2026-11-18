@@ -3,6 +3,11 @@ const { BlockList, isIPv4 } = require('node:net');
 const { networkInterfaces } = require('node:os');
 const { pipeline } = require('node:stream');
 
+function findLanAddress(host) {
+  return Object.values(networkInterfaces()).flat().find((entry) =>
+    entry.family === 'IPv4' && !entry.internal && entry.address === host);
+}
+
 function replyError(response, status, error) {
   response.writeHead(status, {
     'Content-Type': 'application/json',
@@ -62,11 +67,11 @@ function createGateway(upstreamPort = 8766, allowedClient) {
       hostname: '127.0.0.1', port: upstreamPort, method, path: url, headers: upstreamHeaders,
     });
     upstream.on('response', (result) => {
-      const responseHeaders = { 'x-qingyue-service': 'tts' };
+      response.setHeader('x-qingyue-service', 'tts');
       for (const name of ['content-type', 'content-length', 'cache-control', 'x-synthesis-seconds', 'x-audio-seconds']) {
-        if (result.headers[name] !== undefined) responseHeaders[name] = result.headers[name];
+        if (result.headers[name] !== undefined) response.setHeader(name, result.headers[name]);
       }
-      response.writeHead(result.statusCode, responseHeaders);
+      response.writeHead(result.statusCode);
       pipeline(result, response, () => {});
     });
     upstream.on('error', () => {
@@ -91,8 +96,7 @@ function createGateway(upstreamPort = 8766, allowedClient) {
 if (require.main === module) {
   const [host, portArg = '8767', allowedClient] = process.argv.slice(2);
   const port = Number(portArg);
-  const lanAddress = Object.values(networkInterfaces()).flat().find((entry) =>
-    entry.family === 'IPv4' && !entry.internal && entry.address === host);
+  const lanAddress = findLanAddress(host);
   if (!lanAddress || !/^\d+$/.test(portArg) || port < 1 || port > 65535 ||
       (allowedClient !== undefined && !isIPv4(allowedClient))) {
     console.error('Usage: node lan-gateway.cjs <local LAN IPv4 address> [port] [allowed client IPv4 address]');
@@ -114,4 +118,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createGateway };
+module.exports = { createGateway, findLanAddress };
