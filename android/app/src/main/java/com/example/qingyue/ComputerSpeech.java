@@ -35,8 +35,11 @@ final class ComputerSpeech {
     private static final Pattern ELLIPSIS_AT_SENTENCE_END =
             Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
     private static final Pattern ELLIPSIS_PAUSE = Pattern.compile(ELLIPSIS_RUN);
+    private static final String HAN = "[\u3400-\u4dbf\u4e00-\u9fff]";
     private static final Pattern SHORT_UTTERANCE_END = Pattern.compile(
-            "\\A([\\s　“‘「『\"']*[\u3400-\u4dbf\u4e00-\u9fff]{1,3})[!！?？.．:：]++(?=[\\s　”’」』\"']*\\z)");
+            "\\A([\\s　“‘「『\"']*" + HAN + "{1,3})[!！?？.．:：]++(?=[\\s　”’」』\"']*\\z)");
+    private static final Pattern SHORT_QUOTED_STATEMENT = Pattern.compile(
+            "\\A[\\s　]*“[\\s　]*(" + HAN + "{1,12})。[\\s　]*”[\\s　]*\\z");
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -108,9 +111,16 @@ final class ComputerSpeech {
                                                BooleanSupplier cancelled) {
         if (pcm.length <= SHORT_UTTERANCE_RETRY_FRAMES || cancelled.getAsBoolean()) return pcm;
         Matcher ending = SHORT_UTTERANCE_END.matcher(spoken);
-        if (!ending.find()) return pcm;
+        String retryText;
+        if (ending.find()) {
+            retryText = ending.replaceFirst("$1。");
+        } else {
+            Matcher quoted = SHORT_QUOTED_STATEMENT.matcher(spoken);
+            if (!quoted.matches() || pcm.length <= SAMPLE_RATE * Math.max(5, quoted.group(1).length())) return pcm;
+            retryText = spoken.replace("“", "").replace("”", "");
+        }
         try {
-            short[] retry = synthesize(address, synthesisBody(ending.replaceFirst("$1。")));
+            short[] retry = synthesize(address, synthesisBody(retryText));
             return retry.length < pcm.length ? retry : pcm;
         } catch (IOException | JSONException ignored) {
             return pcm;
