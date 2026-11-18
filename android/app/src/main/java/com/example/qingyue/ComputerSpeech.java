@@ -23,9 +23,15 @@ final class ComputerSpeech {
     static final int SAMPLE_RATE = 48000;
     private static final int HEADER_BYTES = 44;
     private static final int MAX_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_TEXT_CHARACTERS = 100;
     private static final int HEALTH_TIMEOUT_MS = 650;
     private static final int MAX_HEALTH_BYTES = 4096;
     private URI lastSuccessful;
+
+    static boolean validText(String text) {
+        return text != null && !text.trim().isEmpty()
+                && text.codePointCount(0, text.length()) <= MAX_TEXT_CHARACTERS;
+    }
 
     static List<URI> addresses(List<?> configured) {
         if (configured == null) return Collections.emptyList();
