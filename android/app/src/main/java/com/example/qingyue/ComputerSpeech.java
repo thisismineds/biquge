@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class ComputerSpeech {
@@ -27,12 +28,15 @@ final class ComputerSpeech {
     private static final int MAX_TEXT_CHARACTERS = 100;
     private static final int HEALTH_TIMEOUT_MS = 650;
     private static final int MAX_HEALTH_BYTES = 4096;
-    private static final String ELLIPSIS_RUN = "(?:·{3,}+|…{2,}+|\\.{3,}+)";
+    private static final int SHORT_UTTERANCE_RETRY_FRAMES = SAMPLE_RATE * 4;
+    private static final String ELLIPSIS_RUN = "(?:·{3,}+|…++|‥++|⋯{2,}+|[.．]{3,}+)";
     private static final Pattern ELLIPSIS_BEFORE_PUNCTUATION =
             Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*[，。！？、；：,.!?;:…])");
     private static final Pattern ELLIPSIS_AT_SENTENCE_END =
             Pattern.compile(ELLIPSIS_RUN + "(?=[\\s　]*(?:[”’」』）】\"']|\\z))");
     private static final Pattern ELLIPSIS_PAUSE = Pattern.compile(ELLIPSIS_RUN);
+    private static final Pattern SHORT_UTTERANCE_END = Pattern.compile(
+            "\\A([\\s　“‘「『\"']*[\u3400-\u4dbf\u4e00-\u9fff]{1,3})[!！?？.．:：]++(?=[\\s　”’」』\"']*\\z)");
     private URI lastSuccessful;
 
     static boolean validText(String text) {
@@ -71,8 +75,8 @@ final class ComputerSpeech {
         if (lastSuccessful != null && candidates.remove(lastSuccessful)) {
             candidates.add(0, lastSuccessful);
         }
-        byte[] body = new JSONObject().put("text", synthesisText(text))
-                .toString().getBytes(StandardCharsets.UTF_8);
+        String spoken = synthesisText(text);
+        byte[] body = synthesisBody(spoken);
         IOException lastFailure = null;
         for (URI address : candidates) {
             if (cancelled.getAsBoolean()) return null;
@@ -81,7 +85,7 @@ final class ComputerSpeech {
                 if (cancelled.getAsBoolean()) return null;
                 short[] pcm = synthesize(address, body);
                 lastSuccessful = address;
-                return pcm;
+                return retryShortUtterance(address, spoken, pcm, cancelled);
             } catch (IOException failure) {
                 lastFailure = failure;
             }
@@ -94,6 +98,23 @@ final class ComputerSpeech {
         String spoken = ELLIPSIS_BEFORE_PUNCTUATION.matcher(text).replaceAll("");
         spoken = ELLIPSIS_AT_SENTENCE_END.matcher(spoken).replaceAll("。");
         return ELLIPSIS_PAUSE.matcher(spoken).replaceAll("，");
+    }
+
+    private static byte[] synthesisBody(String spoken) throws JSONException {
+        return new JSONObject().put("text", spoken).toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static short[] retryShortUtterance(URI address, String spoken, short[] pcm,
+                                               BooleanSupplier cancelled) {
+        if (pcm.length <= SHORT_UTTERANCE_RETRY_FRAMES || cancelled.getAsBoolean()) return pcm;
+        Matcher ending = SHORT_UTTERANCE_END.matcher(spoken);
+        if (!ending.find()) return pcm;
+        try {
+            short[] retry = synthesize(address, synthesisBody(ending.replaceFirst("$1。")));
+            return retry.length < pcm.length ? retry : pcm;
+        } catch (IOException | JSONException ignored) {
+            return pcm;
+        }
     }
 
     private static HttpURLConnection connect(URI address, String path, int connectTimeout,
