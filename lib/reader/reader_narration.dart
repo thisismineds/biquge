@@ -17,6 +17,7 @@ class ReaderNarration extends ChangeNotifier {
   });
 
   static const playbackRates = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+  static const computerVoice = 'qingyue:offline-zh-pc';
   static const _channel = MethodChannel('qingyue/tts');
   static const _followingChapterSegments = 5;
   static final _sentenceEnd = RegExp(r'[。！？!?；;\n]');
@@ -30,6 +31,7 @@ class ReaderNarration extends ChangeNotifier {
 
   String? _text;
   String? _voice;
+  List<String> _computerAddresses = const [];
   double _rate = 1.0;
   int _offset = 0;
   _NarrationSegment? _active;
@@ -58,9 +60,23 @@ class ReaderNarration extends ChangeNotifier {
   String? get voice => _voice;
 
   set voice(String? value) {
-    if (_voice == value) return;
-    _voice = value;
+    final next = value == computerVoice && _computerAddresses.isEmpty
+        ? null
+        : value;
+    if (_voice == next) return;
+    _voice = next;
     _playbackSettingChanged();
+  }
+
+  List<String> get computerAddresses => _computerAddresses;
+
+  set computerAddresses(List<String> value) {
+    if (listEquals(_computerAddresses, value)) return;
+    _computerAddresses = List.unmodifiable(value);
+    if (_voice == computerVoice) {
+      if (value.isEmpty) _voice = null;
+      _playbackSettingChanged();
+    }
   }
 
   double get rate => _rate;
@@ -85,7 +101,12 @@ class ReaderNarration extends ChangeNotifier {
   }
 
   Future<List<NarrationVoice>> voices() async {
-    final raw = await _channel.invokeListMethod<Object?>('voices');
+    final raw = await _channel.invokeListMethod<Object?>(
+      'voices',
+      _computerAddresses.isEmpty
+          ? null
+          : {'computerAddresses': _computerAddresses},
+    );
     return [
       for (final item in raw ?? const [])
         if (item case {
@@ -305,6 +326,7 @@ class ReaderNarration extends ChangeNotifier {
         'text': segment.text,
         'rate': _rate,
         if (_voice != null) 'voice': _voice,
+        if (_voice == computerVoice) 'computerAddresses': _computerAddresses,
       });
     } on PlatformException catch (error) {
       if (method == 'speak') {

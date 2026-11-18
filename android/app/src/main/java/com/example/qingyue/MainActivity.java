@@ -11,6 +11,7 @@ import android.speech.tts.Voice;
 import android.util.Log;
 import android.view.WindowManager;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -47,13 +48,15 @@ public class MainActivity extends FlutterActivity {
         speech = new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), "qingyue/tts");
         speech.setMethodCallHandler((call, result) -> {
             switch (call.method) {
-                case "voices":
+                case "voices": {
+                    List<URI> computerAddresses = ComputerSpeech.addresses(call.argument("computerAddresses"));
                     withEngine(readyEngine -> {
                         List<Map<String, Object>> voices = new ArrayList<>();
                         if (offline != null) {
                             for (OfflineNarrator.Voice voice : OfflineNarrator.Voice.values()) {
-                                if (offline.isAvailable(voice)) {
-                                    voices.add(voiceEntry(voice.id, voice.name, false));
+                                if (offline.isAvailable(voice, computerAddresses)) {
+                                    voices.add(voiceEntry(voice.id, voice.name,
+                                            voice == OfflineNarrator.Voice.COMPUTER));
                                 }
                             }
                         }
@@ -67,13 +70,15 @@ public class MainActivity extends FlutterActivity {
                         result.success(voices);
                     });
                     break;
+                }
                 case "speak":
                     speak(call.argument("id"), call.argument("text"), call.argument("rate"),
-                            call.argument("voice"), result);
+                            call.argument("voice"), ComputerSpeech.addresses(call.argument("computerAddresses")),
+                            result);
                     break;
                 case "prepare":
                     prepare(call.argument("id"), call.argument("text"), call.argument("rate"),
-                            call.argument("voice"));
+                            call.argument("voice"), ComputerSpeech.addresses(call.argument("computerAddresses")));
                     result.success(null);
                     break;
                 case "keepPreparationScreenOn":
@@ -250,11 +255,12 @@ public class MainActivity extends FlutterActivity {
                 && (rate == null || (Float.isFinite(rate.floatValue()) && rate.floatValue() > 0));
     }
 
-    private void prepare(Number id, String text, Number rate, String voiceId) {
+    private void prepare(Number id, String text, Number rate, String voiceId,
+                         List<URI> computerAddresses) {
         OfflineNarrator.Voice voice = offline == null ? null : offline.selectVoice(voiceId);
-        if (voice == null || !offline.isAvailable(voice) || !validSpeech(id, text, rate)
+        if (voice == null || !offline.isAvailable(voice, computerAddresses) || !validSpeech(id, text, rate)
                 || !offline.prepare(id.longValue(), text, rate == null ? 1f : rate.floatValue(), voice,
-                        ok -> notifyPrepared(id, ok))) {
+                        computerAddresses, ok -> notifyPrepared(id, ok))) {
             notifyPrepared(id, false);
         }
     }
@@ -275,7 +281,8 @@ public class MainActivity extends FlutterActivity {
         }
     }
 
-    private void speak(Number id, String text, Number rate, String voiceId, MethodChannel.Result result) {
+    private void speak(Number id, String text, Number rate, String voiceId,
+                       List<URI> computerAddresses, MethodChannel.Result result) {
         if (!validSpeech(id, text, rate)) {
             result.error("invalid_speech", getString(R.string.tts_invalid_speech), null);
             return;
@@ -285,15 +292,18 @@ public class MainActivity extends FlutterActivity {
         OfflineNarrator.Voice offlineVoice = offline == null ? OfflineNarrator.Voice.select(voiceId)
                 : offline.selectVoice(voiceId);
         if (offlineVoice != null) {
-            if (offline == null || !offline.isAvailable(offlineVoice)) {
-                result.error("voice", getString(R.string.tts_offline_failed), null);
+            if (offline == null || !offline.isAvailable(offlineVoice, computerAddresses)) {
+                result.error("voice", offlineVoice == OfflineNarrator.Voice.COMPUTER
+                        ? "请先在听书设置中填写电脑地址。"
+                        : getString(R.string.tts_offline_failed), null);
                 return;
             }
             String token = Long.toString(generation);
             activeId = id;
             activeToken = token;
             offline.speak(id.longValue(), text, rate == null ? 1f : rate.floatValue(), offlineVoice,
-                    offset -> notifyProgress(token, offset), message -> notifyDart(token, message));
+                    computerAddresses, offset -> notifyProgress(token, offset),
+                    message -> notifyDart(token, message));
             result.success(null);
             return;
         }

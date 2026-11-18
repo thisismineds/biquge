@@ -47,6 +47,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _followingChapterRequest = 0;
   static const _voicePreference = 'reader.narrationVoice';
   static const _ratePreference = 'reader.narrationRate';
+  static const _computerAddressesPreference =
+      'reader.narrationComputerAddresses';
   final _voiceRefresh = ValueNotifier(0);
   late final ReaderNarration _narration;
   AppStore get store => widget.store;
@@ -70,6 +72,9 @@ class _ReaderScreenState extends State<ReaderScreen>
             onTransport: _listeningTransport,
             onProgress: _showNarrationPosition,
           )
+          ..computerAddresses =
+              store.preferences.getStringList(_computerAddressesPreference) ??
+              const []
           ..voice = store.preferences.getString(_voicePreference)
           ..rate = savedRate is num ? savedRate.toDouble() : 1.0;
     WidgetsBinding.instance.addObserver(this);
@@ -391,7 +396,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                   final current = _narration.voice == id;
                   return ListTile(
                     title: Text(label),
-                    subtitle: network ? const Text('需要联网') : null,
+                    subtitle: id == ReaderNarration.computerVoice
+                        ? const Text('手机与电脑须在同一局域网')
+                        : network
+                        ? const Text('需要联网')
+                        : null,
                     selected: current,
                     trailing: current ? const Icon(Icons.check_rounded) : null,
                     onTap: () => Navigator.pop(context, (id,)),
@@ -412,6 +421,16 @@ class _ReaderScreenState extends State<ReaderScreen>
                         ),
                       ),
                       voiceTile(null, '自动选择'),
+                      ListTile(
+                        leading: const Icon(Icons.computer_outlined),
+                        title: const Text('电脑合成设置'),
+                        subtitle: Text(
+                          _narration.computerAddresses.isEmpty
+                              ? '添加运行合成服务的电脑地址'
+                              : '已保存 ${_narration.computerAddresses.length} 个地址',
+                        ),
+                        onTap: () => _configureComputerSpeech(context),
+                      ),
                       ListTile(
                         leading: const Icon(Icons.settings_outlined),
                         title: const Text('系统语音设置'),
@@ -450,6 +469,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       _narration.voice = voice;
       unawaited(_prepareFollowingChapter());
     }
+    await _saveNarrationVoice(voice);
+  }
+
+  Future<void> _saveNarrationVoice(String? voice) async {
     try {
       final saved = await (voice == null
           ? store.preferences.remove(_voicePreference)
@@ -458,6 +481,100 @@ class _ReaderScreenState extends State<ReaderScreen>
     } catch (_) {
       if (mounted) _notice('本次音色已切换，但未能保存选择。');
     }
+  }
+
+  Future<void> _configureComputerSpeech(BuildContext sheetContext) async {
+    final form = GlobalKey<FormState>();
+    final input = _narration.computerAddresses.join('\n');
+    final parsed = <String>{};
+    final addresses = await showDialog<List<String>>(
+      context: sheetContext,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('电脑合成设置'),
+        content: Form(
+          key: form,
+          child: TextFormField(
+            initialValue: input,
+            minLines: 3,
+            maxLines: 5,
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.multiline,
+            decoration: const InputDecoration(
+              labelText: '电脑地址',
+              hintText: '192.168.1.20:8767',
+              helperText: '每行一个地址，自动连接可用的电脑。留空可清除。',
+              helperMaxLines: 2,
+            ),
+            validator: (value) {
+              parsed.clear();
+              final lines = (value ?? '').split('\n');
+              for (final (index, line) in lines.indexed) {
+                final address = line.trim();
+                if (address.isEmpty) continue;
+                final origin = _computerOrigin(address);
+                if (origin == null) return '第 ${index + 1} 行不是有效的电脑地址。';
+                parsed.add(origin);
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (form.currentState!.validate()) {
+                Navigator.pop(context, parsed.toList());
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || addresses == null) return;
+    final wasComputerVoice = _narration.voice == ReaderNarration.computerVoice;
+    _narration.computerAddresses = addresses;
+    _voiceRefresh.value++;
+    if (wasComputerVoice) {
+      unawaited(_prepareFollowingChapter());
+      if (addresses.isEmpty) unawaited(_saveNarrationVoice(null));
+    }
+    try {
+      final saved = await store.preferences.setStringList(
+        _computerAddressesPreference,
+        addresses,
+      );
+      if (!saved && mounted) _notice('本次地址已更新，但未能保存。');
+    } catch (_) {
+      if (mounted) _notice('本次地址已更新，但未能保存。');
+    }
+  }
+
+  String? _computerOrigin(String address) {
+    if (RegExp(r'[\s\\]').hasMatch(address)) return null;
+    final url = address.contains('://')
+        ? address
+        : 'http://${address.contains(':') ? address : '$address:8767'}';
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.isEmpty ||
+        uri.authority.contains('@') ||
+        uri.authority.endsWith(':') ||
+        uri.port < 1 ||
+        uri.port > 65535 ||
+        (uri.path.isNotEmpty && uri.path != '/') ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      return null;
+    }
+    return uri.origin;
   }
 
   Future<void> _installNarrationVoices(BuildContext sheetContext) async {

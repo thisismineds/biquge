@@ -28,11 +28,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,6 +48,8 @@ import kotlin.jvm.functions.Function1;
 
 final class OfflineNarrator implements AutoCloseable {
     private static final String TAG = "QingyueOfflineTts";
+    private static final String COMPUTER_FAILURE =
+            "电脑合成未能返回音频。请确认服务已启动、地址正确，且手机与电脑连接同一局域网。";
     private static final int PCM_BLOCK_SAMPLES = 32768;
     private static final Object CACHE_SETUP_LOCK = new Object();
     private static boolean checkedSpeechCache;
@@ -78,6 +82,7 @@ final class OfflineNarrator implements AutoCloseable {
 
     enum Voice {
         CLEAR("qingyue:offline-zh-clear", "清朗播音 · 原创男声", Model.BROADCAST, 0),
+        COMPUTER("qingyue:offline-zh-pc", "清朗播音 · 电脑合成", null, 0),
         FIRST("qingyue:offline-zh", "清阅普通话男声1", Model.KOKORO, 58),
         SECOND("qingyue:offline-zh-2", "清阅普通话男声2", Model.KOKORO, 95),
         THIRD("qingyue:offline-zh-3", "清阅普通话女声", Model.KOKORO, 3),
@@ -114,6 +119,7 @@ final class OfflineNarrator implements AutoCloseable {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(
             1, 1, 0, TimeUnit.MILLISECONDS, synthesisQueue);
     private final ExecutorService cacheReader = Executors.newSingleThreadExecutor();
+    private final ComputerSpeech computer = new ComputerSpeech();
 
     // The synthesizer belongs exclusively to the worker. Playback slots belong to main.
     private OfflineTts tts;
@@ -129,6 +135,7 @@ final class OfflineNarrator implements AutoCloseable {
         final String text;
         final float speed;
         final Voice voice;
+        final List<URI> computerAddresses;
         volatile boolean cancelled;
         volatile boolean cacheToDisk;
         Consumer<Boolean> preparation;
@@ -137,16 +144,17 @@ final class OfflineNarrator implements AutoCloseable {
         BufferedSpeech ready;
         boolean retryOnPreparationFailure;
 
-        Segment(long id, String text, float speed, Voice voice) {
+        Segment(long id, String text, float speed, Voice voice, List<URI> computerAddresses) {
             this.id = id;
             this.text = text;
             this.speed = speed;
             this.voice = voice;
+            this.computerAddresses = computerAddresses;
         }
 
-        boolean matches(long id, String text, float speed, Voice voice) {
-            return this.id == id && this.speed == speed && this.voice == voice
-                    && this.text.equals(text);
+        boolean matchesSettings(float speed, Voice voice, List<URI> computerAddresses) {
+            return this.speed == speed && this.voice == voice
+                    && this.computerAddresses.equals(computerAddresses);
         }
 
         @Override
@@ -201,6 +209,10 @@ final class OfflineNarrator implements AutoCloseable {
 
     boolean isAvailable(Voice voice) {
         return available.contains(voice.model);
+    }
+
+    boolean isAvailable(Voice voice, List<URI> computerAddresses) {
+        return voice == Voice.COMPUTER ? !computerAddresses.isEmpty() : isAvailable(voice);
     }
 
     Voice selectVoice(String id) {
@@ -305,10 +317,13 @@ final class OfflineNarrator implements AutoCloseable {
         }
     }
 
-    boolean prepare(long id, String text, float speed, Voice voice, Consumer<Boolean> onPrepared) {
+    boolean prepare(long id, String text, float speed, Voice voice, List<URI> computerAddresses,
+                    Consumer<Boolean> onPrepared) {
         if ((lastSpokenId != null && id <= lastSpokenId) || prepared.containsKey(id)
-                || (current != null && (current.speed != speed || current.voice != voice))) return false;
-        Segment segment = new Segment(id, text, speed, voice);
+                || (current != null && !current.matchesSettings(speed, voice, computerAddresses))) {
+            return false;
+        }
+        Segment segment = new Segment(id, text, speed, voice, computerAddresses);
         segment.cacheToDisk = true;
         segment.preparation = onPrepared;
         segment.retryOnPreparationFailure = true;
@@ -317,19 +332,19 @@ final class OfflineNarrator implements AutoCloseable {
         return true;
     }
 
-    void speak(long id, String text, float speed, Voice voice, IntConsumer progress,
-               Consumer<String> completion) {
+    void speak(long id, String text, float speed, Voice voice, List<URI> computerAddresses,
+               IntConsumer progress, Consumer<String> completion) {
         discard(current);
         stopTrack();
         lastSpokenId = id;
         Segment next = prepared.remove(id);
-        if (next != null && next.matches(id, text, speed, voice)) {
+        if (next != null && next.text.equals(text) && next.matchesSettings(speed, voice, computerAddresses)) {
             if (Log.isLoggable(TAG, Log.DEBUG)
                     && (next.ready == null || next.ready.frames > 0)) {
                 Log.d(TAG, next.ready == null ? "Reused in-flight segment" : "Reused buffered segment");
             }
             prepared.values().removeIf(segment -> {
-                if (segment.id > id && segment.speed == speed && segment.voice == voice) return false;
+                if (segment.id > id && segment.matchesSettings(speed, voice, computerAddresses)) return false;
                 discard(segment);
                 return true;
             });
@@ -341,7 +356,7 @@ final class OfflineNarrator implements AutoCloseable {
         } else {
             discard(next);
             discardPrepared();
-            current = new Segment(id, text, speed, voice);
+            current = new Segment(id, text, speed, voice, computerAddresses);
             current.progress = progress;
             current.completion = completion;
             worker.execute(current);
@@ -350,58 +365,75 @@ final class OfflineNarrator implements AutoCloseable {
 
     private void synthesize(Segment segment) {
         if (segment.cancelled) return;
+        boolean computerVoice = segment.voice == Voice.COMPUTER;
         try {
-            float[] samples;
-            int sampleRate;
-            if (segment.voice == Voice.CLEAR) {
-                if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
-                    publish(segment, new BufferedSpeech(null, null, 0, 0, null));
-                    return;
-                }
-                long started = SystemClock.elapsedRealtime();
-                MossNarratorEngine model = broadcastSynthesizer();
-                if (segment.cancelled) return;
-                samples = model.synthesize(segment.text, () -> segment.cancelled);
-                sampleRate = model.sampleRate();
-                if (Log.isLoggable(TAG, Log.DEBUG)) {
-                    Log.d(TAG, "Broadcast synthesis ms=" + (SystemClock.elapsedRealtime() - started)
-                            + " audioMs=" + (samples.length * 1000L / sampleRate));
-                }
+            if ((computerVoice || segment.voice == Voice.CLEAR)
+                    && segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
+                publish(segment, new BufferedSpeech(null, null, 0, 0, null));
+                return;
+            }
+            if (computerVoice) {
+                releaseSynthesizer();
+                short[] pcm = computer.fetch(segment.computerAddresses, segment.text, () -> segment.cancelled);
+                if (pcm != null) publishPcm(segment, pcm, ComputerSpeech.SAMPLE_RATE);
             } else {
-                OfflineTts model = synthesizer(segment.voice);
-                if (segment.cancelled) return;
-                if (segment.voice.speakerId >= model.numSpeakers()) {
-                    throw new IllegalStateException("Selected speaker is missing from the model");
-                }
-                GeneratedAudio audio = model.generateWithCallback(segment.text, segment.voice.speakerId,
-                        segment.speed, new SynthesisCancellation(segment));
-                samples = audio.getSamples();
-                sampleRate = audio.getSampleRate();
-            }
-            if (segment.cancelled) return;
-            if (samples.length == 0 || sampleRate <= 0) {
-                if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
-                    publish(segment, new BufferedSpeech(null, null, 0, 0, null));
-                    return;
-                }
-                throw new IllegalStateException("No speech samples generated");
-            }
-            short[] pcm = new short[samples.length];
-            for (int i = 0; i < samples.length; i++) {
-                pcm[i] = (short) Math.round(Math.max(-1f, Math.min(1f, samples[i])) * 32767f);
-            }
-            if (segment.cancelled) return;
-            if (segment.cacheToDisk) {
-                File file = writeCache(segment, pcm);
-                if (file != null) publish(segment, new BufferedSpeech(null, file, pcm.length, sampleRate, null));
-            } else {
-                publish(segment, new BufferedSpeech(pcm, null, pcm.length, sampleRate, null));
+                synthesizeLocal(segment);
             }
         } catch (IOException | JSONException | OrtException | RuntimeException | LinkageError failure) {
             if (!segment.cancelled) {
                 Log.w(TAG, "Could not synthesize or cache audio", failure);
-                publish(segment, new BufferedSpeech(null, null, 0, 0, failureMessage));
+                publish(segment, new BufferedSpeech(null, null, 0, 0,
+                        computerVoice ? COMPUTER_FAILURE : failureMessage));
             }
+        }
+    }
+
+    private void synthesizeLocal(Segment segment) throws IOException, JSONException, OrtException {
+        float[] samples;
+        int sampleRate;
+        if (segment.voice == Voice.CLEAR) {
+            long started = SystemClock.elapsedRealtime();
+            MossNarratorEngine model = broadcastSynthesizer();
+            if (segment.cancelled) return;
+            samples = model.synthesize(segment.text, () -> segment.cancelled);
+            sampleRate = model.sampleRate();
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "Broadcast synthesis ms=" + (SystemClock.elapsedRealtime() - started)
+                        + " audioMs=" + (samples.length * 1000L / sampleRate));
+            }
+        } else {
+            OfflineTts model = synthesizer(segment.voice);
+            if (segment.cancelled) return;
+            if (segment.voice.speakerId >= model.numSpeakers()) {
+                throw new IllegalStateException("Selected speaker is missing from the model");
+            }
+            GeneratedAudio audio = model.generateWithCallback(segment.text, segment.voice.speakerId,
+                    segment.speed, new SynthesisCancellation(segment));
+            samples = audio.getSamples();
+            sampleRate = audio.getSampleRate();
+        }
+        if (segment.cancelled) return;
+        if (samples.length == 0 || sampleRate <= 0) {
+            if (segment.text.codePoints().noneMatch(Character::isLetterOrDigit)) {
+                publish(segment, new BufferedSpeech(null, null, 0, 0, null));
+                return;
+            }
+            throw new IllegalStateException("No speech samples generated");
+        }
+        short[] pcm = new short[samples.length];
+        for (int i = 0; i < samples.length; i++) {
+            pcm[i] = (short) Math.round(Math.max(-1f, Math.min(1f, samples[i])) * 32767f);
+        }
+        publishPcm(segment, pcm, sampleRate);
+    }
+
+    private void publishPcm(Segment segment, short[] pcm, int sampleRate) throws IOException {
+        if (segment.cancelled) return;
+        if (segment.cacheToDisk) {
+            File file = writeCache(segment, pcm);
+            if (file != null) publish(segment, new BufferedSpeech(null, file, pcm.length, sampleRate, null));
+        } else {
+            publish(segment, new BufferedSpeech(pcm, null, pcm.length, sampleRate, null));
         }
     }
 
@@ -541,7 +573,8 @@ final class OfflineNarrator implements AutoCloseable {
                 public void onPeriodicNotification(AudioTrack ignored) {}
             }, main);
             track.setNotificationMarkerPosition(frameCount);
-            if (segment.voice == Voice.CLEAR && segment.speed != 1f) {
+            if ((segment.voice == Voice.CLEAR || segment.voice == Voice.COMPUTER)
+                    && segment.speed != 1f) {
                 track.setPlaybackParams(new PlaybackParams().setPitch(1f).setSpeed(segment.speed));
             }
             track.play();

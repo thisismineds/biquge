@@ -12,6 +12,122 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   testWidgets(
+    'reader saves multiple PC addresses and uses them for listening',
+    (tester) async {
+      const channel = MethodChannel('qingyue/tts');
+      const voiceId = 'qingyue:offline-zh-pc';
+      const voiceLabel = '清朗播音 · 电脑合成';
+      const addresses = ['http://192.168.1.20:8767', 'https://pc.example.test'];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'voices') {
+          return [
+            if (call.arguments != null)
+              {'id': voiceId, 'label': voiceLabel, 'networkRequired': true},
+          ];
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      SharedPreferences.setMockInitialValues({
+        'reader.narrationRate': 2.0,
+        '42chapters': jsonEncode([
+          {'id': 51, 'name': '第一章', 'hasContent': 2},
+          {'id': 52, 'name': '第二章', 'hasContent': 2},
+        ]),
+        '51': '第一章第一段。\n第一章第二段。',
+        '52': '第二章第一段。',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final store = AppStore(prefs);
+      final book = BookInfo.id(42, '电脑合成测试');
+      Future<void> openVoicePicker() async {
+        await tester.pumpWidget(
+          ReaderApp(
+            store: store,
+            home: ReaderScreen(store: store, book: book),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('听书'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('音色'));
+        await tester.pumpAndSettle();
+      }
+
+      await openVoicePicker();
+      expect(find.text(voiceLabel), findsNothing);
+      await tester.tap(find.text('电脑合成设置'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextFormField),
+        'http://user@192.168.1.20:8767',
+      );
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(find.text('第 1 行不是有效的电脑地址。'), findsOneWidget);
+      expect(prefs.getStringList('reader.narrationComputerAddresses'), isNull);
+
+      await tester.enterText(
+        find.byType(TextFormField),
+        '192.168.1.20\nhttps://pc.example.test/\nhttp://192.168.1.20:8767/',
+      );
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(
+        prefs.getStringList('reader.narrationComputerAddresses'),
+        addresses,
+      );
+      expect(calls.lastWhere((call) => call.method == 'voices').arguments, {
+        'computerAddresses': addresses,
+      });
+      await tester.tap(find.text(voiceLabel));
+      await tester.pumpAndSettle();
+      expect(prefs.getString('reader.narrationVoice'), voiceId);
+
+      await tester.pumpWidget(const SizedBox());
+      await openVoicePicker();
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, voiceLabel))
+            .selected,
+        isTrue,
+      );
+      await tester.tap(find.text(voiceLabel));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放'));
+      await tester.pumpAndSettle();
+      expect(calls.where((call) => call.method == 'prepare'), hasLength(2));
+      expect(calls.where((call) => call.method == 'speak'), hasLength(1));
+      for (final call in calls.where(
+        (call) => call.method == 'speak' || call.method == 'prepare',
+      )) {
+        expect(call.arguments['voice'], voiceId);
+        expect(call.arguments['rate'], 2.0);
+        expect(call.arguments['computerAddresses'], addresses);
+      }
+
+      await tester.tap(find.text('音色'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('电脑合成设置'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '');
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(prefs.getStringList('reader.narrationComputerAddresses'), isEmpty);
+      expect(prefs.getString('reader.narrationVoice'), isNull);
+      expect(find.text(voiceLabel), findsNothing);
+      final local = calls.lastWhere((call) => call.method == 'speak').arguments;
+      expect(local, isNot(contains('computerAddresses')));
+      expect(local, isNot(contains('voice')));
+      expect(local['rate'], 2.0);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'reader prepares the chapter before starting lock-screen playback',
     (tester) async {
       tester.view.physicalSize = const Size(320, 640);
